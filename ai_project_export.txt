@@ -1,0 +1,1814 @@
+--- PROJECT EXPORT FOR AI DEBUGGING ---
+Generated at: 2026-05-16 16:05:04
+
+========================================
+FILE: Auth/Login.php
+PATH: app/Livewire/Auth/Login.php
+========================================
+<?php
+
+namespace App\Livewire\Auth;
+
+use Illuminate\Support\Facades\Auth;
+use Livewire\Attributes\Validate;
+use Livewire\Component;
+
+class Login extends Component
+{
+
+    #[Validate('required|email')]
+    public $email = '';
+    #[Validate('required|min:8')]
+    public $password = '';
+
+    public function login()
+    {
+        $this->validate();
+        if (Auth::attempt(['email' => $this->email, 'password' => $this->password]))
+        {
+            session()->regenerate();
+            session()->flash('success', 'Successfully logged in! Welcome back.');
+            return redirect()->intended('/');
+        }
+
+        $this->addError('email', 'Invalid email or password.');
+    }
+    public function render()
+    {
+        return view('livewire.auth.login');
+    }
+}
+
+
+========================================
+FILE: Auth/Register.php
+PATH: app/Livewire/Auth/Register.php
+========================================
+<?php
+
+namespace App\Livewire\Auth;
+
+use App\Models\User;
+use Illuminate\Support\Facades\Auth;
+use Livewire\Attributes\Validate;
+use Livewire\Component;
+
+class Register extends Component
+{
+    #[Validate('required|min:3|max:32')]
+    public $name = '';
+    #[Validate('required|email|unique:users')]
+    public $email = '';
+    #[Validate('required|min:8')]
+    public $password = '';
+
+    public function register()
+    {
+        $this->validate();
+
+        $user = User::create([
+            'name' => $this->name,
+            'email' => $this->email,
+            'password' => bcrypt($this->password),
+        ]);
+
+        Auth::login($user);
+
+        session()->flash('success', 'Account successfully created!');
+        session()->flash('welcome', "Welcome to ByteBookLetter, {$user->name}!");
+
+        return redirect()->intended('/');
+     }
+
+
+    public function render()
+    {
+        return view('livewire.auth.register');
+    }
+}
+
+
+========================================
+FILE: Forms/Posts/PostForm.php
+PATH: app/Livewire/Forms/Posts/PostForm.php
+========================================
+<?php
+
+namespace App\Livewire\Forms\Posts;
+
+use App\Enums\PostPrivacy;
+use App\Models\Post;
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\Rules\Enum;
+use Livewire\Attributes\Isolate;
+use Livewire\Attributes\Validate;
+use Livewire\Form;
+
+class PostForm extends Form
+{
+
+    public ?Post $post;
+
+    #[Validate('required_without:images|max:1255')]
+    public $body = '';
+
+    #[Validate([
+
+        'images' => 'nullable|array|max:100',
+        'images.*' => 'image|mimes:jpeg,png,jpg,gif,svg|max:2048',
+    ])]
+    public $images = [];
+
+    #[Validate(['required', new Enum(PostPrivacy::class)])]
+    public string $privacy = 'public';
+
+    public function messages()
+    {
+        return [
+            // Rule: property.rule_name => 'Your Custom Message'
+            'body.required_without' => 'Please write something or upload a photo to share your post!',
+            'body.max' => 'Wow, that is a long story! Please keep it under 1,255 characters.',
+            'images.*.image' => 'One of your files is not a valid image.',
+        ];
+    }
+
+    public function removeImage($index)
+    {
+        $this->images = collect($this->images)
+            ->forget($index)
+            ->values()
+            ->all();
+    }
+
+    public function setPost(Post $post)
+    {
+        $this->post = $post;
+        $this->body = $post->body;
+        $this->privacy = $post->privacy->value;
+    }
+
+    #[Isolate]
+    public function update()
+    {
+        Gate::authorize('update', $this->post);
+
+        $this->validate();
+
+        DB::transaction(function () {
+            $this->post->update([
+                'body' => $this->body,
+                'privacy' => $this->privacy,
+            ]);
+            if ($this->images) {
+                foreach ($this->images as $image) {
+                    $path = $image->store('posts', 'public');
+                    $this->post->images()->create(['path' => $path]);
+                }
+            }
+        });
+        $this->reset('images');
+    }
+
+    #[Isolate]
+    public function save()
+    {
+        Gate::authorize('create', Post::class);
+
+        $this->validate();
+
+        DB::transaction(function () {
+           $newPost = auth()->user()->posts()->create([
+                'body' => $this->body,
+                'privacy' => $this->privacy,
+            ]);
+
+            if ($this->images) {
+                foreach ($this->images as $image) {
+                    $path = $image->store('posts', 'public');
+                    $newPost->images()->create(['path' => $path]);
+                }
+            }
+        });
+
+        $this->reset(['body', 'images',]);
+
+    }
+}
+
+
+========================================
+FILE: Posts/Comments.php
+PATH: app/Livewire/Posts/Comments.php
+========================================
+<?php
+
+namespace App\Livewire\Posts;
+
+use App\Models\Post;
+use Livewire\Component;
+
+class Comments extends Component
+{
+    public Post $post;
+    public $replyingTo = null;
+    public $newComment = '';
+
+    public function mount(Post $post)
+    {
+        $this->post = $post;
+    }
+    public function setReply($commentId)
+    {
+        $this->replyingTo = $commentId;
+    }
+
+    public function postComment()
+    {
+        $this->validate(['newComment' => 'required|min:1']);
+        auth()->user()->comments()->create([
+            'post_id' => $this->post->id,
+            'parent_id' => $this->replyingTo,
+            'body' => $this->newComment,
+        ]);
+
+        $this->reset(['newComment', 'replyingTo']);
+        $this->dispatch('comment-added');
+    }
+
+    public function render()
+    {
+        return view('livewire.posts.comments');
+    }
+}
+
+
+========================================
+FILE: Posts/Create.php
+PATH: app/Livewire/Posts/Create.php
+========================================
+<?php
+
+namespace App\Livewire\Posts;
+
+use App\Livewire\Forms\Posts\PostForm;
+use Livewire\Component;
+use Livewire\WithFileUploads;
+
+
+class Create extends Component
+{
+    public Postform $form;
+    use WithFileUploads;
+
+    public function save()
+    {
+        $this->form->save();
+        $this->dispatch('post-created');
+        session()->flash('success_CreatedPost', 'Your post has been shared with the world!');
+        return $this->redirect('/feed', navigate: true);
+    }
+
+    public function removeImage($index)
+    {
+        $this->form->removeImage($index);
+    }
+
+    public function render()
+    {
+        return view('livewire.posts.create');
+    }
+}
+
+
+========================================
+FILE: Posts/Edit.php
+PATH: app/Livewire/Posts/Edit.php
+========================================
+<?php
+
+namespace App\Livewire\Posts;
+
+use App\Livewire\Forms\Posts\PostForm;
+use App\Models\Post;
+use Livewire\Component;
+
+class Edit extends Component
+{
+    public PostForm $form;
+    public Post $post;
+    public string $previousurl;
+
+
+    public function mount(Post $post)
+    {
+        $this->form->setPost($post);
+        $this->previousurl = url()->previous();
+    }
+
+    public function update()
+    {
+        $this->form->update();
+        $this->dispatch('post-updated');
+        session()->flash('success_EditedPost', 'Your post has been edited.');
+
+        return $this->redirect($this->previousurl, navigate: true);
+    }
+
+    public function render()
+    {
+        return view('livewire.posts.edit');
+    }
+}
+
+
+========================================
+FILE: Posts/Like.php
+PATH: app/Livewire/Posts/Like.php
+========================================
+<?php
+
+namespace App\Livewire\Posts;
+
+use App\Models\Post;
+use Livewire\Attributes\Computed;
+use Livewire\Component;
+
+class Like extends Component
+{
+    public Post $post;
+
+    public function mount(Post $post)
+    {
+        $this->post = $post;
+    }
+
+    #[Computed]
+    public function isLiked()
+    {
+        if (!auth()->check()) {
+            return false;
+        }
+        return auth()->user()->likes()
+            ->where('post_id', $this->post->id)
+            ->exists();
+
+    }
+
+    public function toggleLike()
+    {
+        if (!auth()->user()) {
+            redirect('/login');
+        }
+
+        $like = auth()->user()->likes()->where('post_id', $this->post->id);
+        if ($like->exists()) {
+            $like->delete();
+        } else {
+            auth()->user()->likes()->create([
+                'post_id' => $this->post->id,
+            ]);
+        }
+    }
+
+
+    public function render()
+    {
+        return view('livewire.posts.like');
+    }
+}
+
+
+========================================
+FILE: Users/Edit.php
+PATH: app/Livewire/Users/Edit.php
+========================================
+<?php
+
+namespace App\Livewire\Users;
+
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Livewire\Attributes\Isolate;
+use Livewire\Attributes\Validate;
+use Livewire\Component;
+use Livewire\WithFileUploads;
+
+class Edit extends Component
+{
+    use WithFileUploads;
+
+    #[Validate('nullable|image|mimes:jpeg,png,jpg,gif,svg|max:16767')]
+    public $newAvatar;
+    #[Validate('nullable|image|mimes:jpeg,png,jpg,gif,svg|max:16767')]
+    public $newBanner;
+    #[Validate('nullable|string|max:1255')]
+    public $newBio;
+
+
+    public function mount()
+    {
+        $this->newBio = auth()->user()->bio;
+    }
+
+    #[Isolate]
+    public function update()
+    {
+        $user = auth()->user();
+        $this->validate();
+        /**
+         * THE BACK-END BRIDGE (PHP Closure Logic)
+         *
+         * 1. function () -> This creates a "Bubble" (Closure). Code inside cannot see
+         *    the outside world by default.
+         *
+         * 2. use ($user) -> This is the "Bridge." It pulls the $user variable from
+         *    the component's neighborhood into the bubble so the logic can use it.
+         *
+         * 3. Why? -> We wrap the code in this "Bubble" so Laravel's DB engine can
+         *    hold it and only "Execute" it when the database connection is secure.
+         */
+        DB::transaction(function () use ($user) {
+            if ($this->newAvatar) {
+                if ($user->avatar) {
+                    Storage::disk('public')->delete($user->avatar);
+                }
+                $avatarPath = $this->newAvatar->store('avatars', 'public');
+                $user->avatar = $avatarPath;
+            }
+
+            if ($this->newBanner) {
+                if ($user->banner) {
+                    Storage::disk('public')->delete($user->banner);
+                }
+                $bannerPath = $this->newBanner->store('banners', 'public');
+                $user->banner = $bannerPath;
+            }
+
+            $user->bio = $this->newBio;
+
+            $user->save();
+        });
+
+        $this->reset(['newAvatar', 'newBanner']);
+        session()->flash('success', 'Profile identity updated!');
+        return $this->redirectRoute('profile.show', $user, navigate: true);
+    }
+
+    public function render()
+    {
+        return view('livewire.users.edit');
+    }
+}
+
+
+========================================
+FILE: Users/Follow.php
+PATH: app/Livewire/Users/Follow.php
+========================================
+<?php
+
+namespace App\Livewire\Users;
+
+use App\Models\User;
+use Livewire\Attributes\Computed;
+use Livewire\Attributes\Locked;
+use Livewire\Component;
+
+class Follow extends Component
+{
+    #[Locked] // Security: Browser can't touch this
+    public $targetId;
+
+    public function mount($targetId)
+    {
+        $this->targetId = $targetId;
+    }
+
+    #[Computed] // Performance: Caches the DB query
+    public function isFollowing()
+    {
+        if (!auth()->check()) {
+            return false;
+        }
+        return auth()->user()->following()->where('user_id', $this->targetId)->exists();
+    }
+
+    public function toggleFollow()
+    {
+        if (!auth()->check()) return $this->redirect('login');
+
+        if (auth()->id() === $this->targetId) return; // Logic: Don't follow self
+        $userToFollow = User::findOrFail($this->targetId);
+        auth()->user()->following()->toggle($userToFollow);
+    }
+
+    public function render()
+    {
+        return view('livewire.users.follow');
+    }
+}
+
+
+========================================
+FILE: Users/Show.php
+PATH: app/Livewire/Users/Show.php
+========================================
+<?php
+
+namespace App\Livewire\Users;
+
+use App\Models\User;
+use Livewire\Component;
+
+class Show extends Component
+{
+    public User $user;
+
+    public function mount(User $user)
+    {
+        $this->user = $user;
+    }
+
+    public function render()
+    {
+        $query = $this->user->posts()->with(['user', 'images'])->latest();
+
+        $allowedPrivacy = ['public'];
+        if (auth()->check()) {
+            $isOwner = auth()->id() === $this->user->id;
+            $iFollowThem = auth()->user()->following()->where('user_id', $this->user->id)->exists();
+
+            if ($isOwner) {
+                $allowedPrivacy = ['public', 'friends', 'private'];
+            } elseif ($iFollowThem) {
+                $allowedPrivacy = ['public', 'friends'];
+            }
+        }
+
+        $posts = $query->whereIn('privacy', $allowedPrivacy)->get();
+
+        return view('livewire.users.show', [
+            'posts' => $posts,
+            'followersList' => $this->user->followers()->latest()->get(),
+            'followingList' => $this->user->following()->latest()->get(),
+        ]);
+    }
+}
+
+
+========================================
+FILE: Comment.php
+PATH: app/Models/Comment.php
+========================================
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Comment extends Model
+{
+    protected $fillable = ['post_id', 'parent_id', 'body', 'user_id'];
+
+
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function post()
+    {
+        return $this->belongsTo(Post::class);
+    }
+    public function parent()
+    {
+        // Logic: Find the ONE row where the "id" matches MY "parent_id"
+        return $this->belongsTo(Comment::class, 'parent_id');
+    }
+
+    public function replies()
+    {
+        // Logic: Find all rows where the "parent_id" matches MY "id"
+        return $this->hasMany(Comment::class, 'parent_id');
+    }
+
+    public function likes()
+    {
+        return $this->hasMany(CommentLike::class);
+    }
+}
+
+
+========================================
+FILE: CommentLike.php
+PATH: app/Models/CommentLike.php
+========================================
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class CommentLike extends Model
+{
+    protected $fillable = ['user_id','comment_id'];
+
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function comment()
+    {
+        return $this->belongsTo(Comment::class);
+    }
+}
+
+
+========================================
+FILE: Like.php
+PATH: app/Models/Like.php
+========================================
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Like extends Model
+{
+protected $fillable = ['user_id', 'post_id'];
+
+}
+
+
+========================================
+FILE: Post.php
+PATH: app/Models/Post.php
+========================================
+<?php
+
+namespace App\Models;
+
+use App\Enums\PostPrivacy;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class Post extends Model
+{
+    protected $fillable = ['body', 'privacy', 'user_id',];
+
+    protected function casts(): array
+    {
+        return [
+            'privacy' => PostPrivacy::class,
+        ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function comments()
+    {
+        return $this->hasMany(Comment::class);
+    }
+
+    public function likes()
+    {
+        return $this->hasMany(Like::class);
+    }
+
+    public function images()
+    {
+        return $this->hasMany(PostImage::class);
+    }
+}
+
+
+========================================
+FILE: PostImage.php
+PATH: app/Models/PostImage.php
+========================================
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class PostImage extends Model
+{
+    protected $fillable = ['post_id', 'path'];
+    public function post()
+    {
+        return $this->belongsTo(Post::class);
+    }
+}
+
+
+========================================
+FILE: User.php
+PATH: app/Models/User.php
+========================================
+<?php
+
+namespace App\Models;
+
+// use Illuminate\Contracts\Auth\MustVerifyEmail;
+use Database\Factories\UserFactory;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Attributes\Hidden;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+
+#[Fillable(['name', 'email', 'password','avatar', 'banner', 'bio'])]
+#[Hidden(['password', 'remember_token'])]
+class User extends Authenticatable
+{
+    /** @use HasFactory<UserFactory> */
+    use HasFactory, Notifiable;
+
+    /**
+     * Get the attributes that should be cast.
+     *
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' => 'datetime',
+            'password' => 'hashed',
+        ];
+    }
+
+    public function posts(): HasMany
+    {
+     return $this->hasMany(Post::class);
+    }
+
+    public function comments()
+    {
+        return $this->hasMany(Comment::class);
+    }
+
+    public function commentLikes()
+    {
+        return $this->hasMany(CommentLike::class);
+    }
+
+    public function likes()
+    {
+        return $this->hasMany(Like::class);
+    }
+
+    public function following()
+    {
+        return $this->belongsToMany(User::class, 'follows', 'follower_id', 'user_id')->withTimestamps();
+    }
+    public function followers()
+    {
+        return $this->belongsToMany(User::class, 'follows', 'user_id', 'follower_id')->withTimestamps();
+    }
+
+
+}
+
+
+========================================
+FILE: Controller.php
+PATH: app/Http/Controllers/Controller.php
+========================================
+<?php
+
+namespace App\Http\Controllers;
+
+abstract class Controller
+{
+    //
+}
+
+
+========================================
+FILE: auth/login.blade.php
+PATH: resources/views/livewire/auth/login.blade.php
+========================================
+<div x-data="{
+        wakingUp: false,
+        magneticX: 0,
+        magneticY: 0
+    }"
+     x-init="setTimeout(() => wakingUp = true, 100)"
+     class="relative min-h-screen flex items-center justify-center px-6 overflow-hidden">
+
+    <!-- THE LIGHTING: Floating Clouds (Deep Indigo & Dark Violet) -->
+    <div class="fixed inset-0 pointer-events-none z-0">
+        <div class="absolute -top-[10%] -left-[10%] w-[60%] h-[60%] animate-cloud-indigo blur-[120px]"></div>
+        <div class="absolute bottom-0 -right-[10%] w-[50%] h-[50%] animate-cloud-violet blur-[120px]"></div>
+    </div>
+
+    <!-- LOGIN CARD -->
+    <div x-show="wakingUp"
+         x-transition:enter="transition ease-out duration-1000"
+         x-transition:enter-start="opacity-0 scale-95 translate-y-10"
+         x-transition:enter-end="opacity-100 scale-100 translate-y-0"
+         class="relative z-10 w-full max-w-md bg-zinc-900/40 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] p-10 shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]">
+
+        <!-- Brand Header -->
+        <div class="text-center mb-10">
+            <div class="inline-flex items-center justify-center w-12 h-12 bg-white rounded-2xl mb-6 shadow-[0_0_30px_rgba(255,255,255,0.1)]">
+                <svg class="w-7 h-7 text-zinc-950" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                </svg>
+            </div>
+            <h1 class="text-3xl font-black tracking-tighter text-white italic">Welcome <span class="text-indigo-400">Back</span></h1>
+            <p class="text-zinc-500 text-sm mt-2 font-medium tracking-tight">Re-synchronizing your data universe.</p>
+        </div>
+
+        <form wire:submit.prevent="login" class="space-y-6">
+
+            <!-- Field: Email (Staggered 1) -->
+            <div x-show="wakingUp"
+                 x-transition:enter="transition delay-[200ms] duration-700"
+                 x-transition:enter-start="opacity-0 translate-y-4"
+                 x-transition:enter-end="opacity-100 translate-y-0">
+                <label class="block text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500 mb-2 ml-1">Identity (Email)</label>
+                <input wire:model="email" type="email"
+                       class="w-full bg-zinc-800/30 border-none outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-2xl p-4 text-sm text-white placeholder-zinc-700 caret-indigo-500 transition-all shadow-inner"
+                       placeholder="Enter your email">
+                @error('email') <span class="text-[10px] text-red-500 font-bold mt-2 ml-1 block uppercase tracking-widest animate-pulse">{{ $message }}</span> @enderror
+            </div>
+
+            <!-- Field: Password (Staggered 2) -->
+            <div x-show="wakingUp"
+                 x-transition:enter="transition delay-[300ms] duration-700"
+                 x-transition:enter-start="opacity-0 translate-y-4"
+                 x-transition:enter-end="opacity-100 translate-y-0">
+                <div class="flex justify-between items-center mb-2 ml-1">
+                    <label class="block text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500">Access Key</label>
+                    <a href="#" class="text-[9px] font-bold text-indigo-400 uppercase tracking-widest hover:text-white transition-colors">Forgot?</a>
+                </div>
+                <input wire:model="password" type="password"
+                       class="w-full bg-zinc-800/30 border-none outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-2xl p-4 text-sm text-white placeholder-zinc-700 caret-indigo-500 transition-all shadow-inner"
+                       placeholder="••••••••">
+                @error('password') <span class="text-[10px] text-red-500 font-bold mt-2 ml-1 block uppercase tracking-widest animate-pulse">{{ $message }}</span> @enderror
+            </div>
+
+            <!-- THE MAGNETIC LOGIN BUTTON (Staggered 3) -->
+            <div class="pt-4"
+                 x-show="wakingUp"
+                 x-transition:enter="transition delay-[400ms] duration-700"
+                 x-transition:enter-start="opacity-0 translate-y-4"
+                 x-transition:enter-end="opacity-100 translate-y-0"
+                 @mousemove="
+                    let rect = $el.getBoundingClientRect();
+                    magneticX = ($event.clientX - rect.left - rect.width/2) * 0.4;
+                    magneticY = ($event.clientY - rect.top - rect.height/2) * 0.4;
+                 "
+                 @mouseleave="magneticX = 0; magneticY = 0">
+
+                <button type="submit"
+                        wire:loading.attr="disabled"
+                        :style="`transform: translate(${magneticX}px, ${magneticY}px)`"
+                        class="relative w-full py-5 bg-white text-zinc-950 rounded-[1.2rem] font-black text-xs uppercase tracking-[0.2em] transition-all duration-200 hover:shadow-[0_0_40px_rgba(255,255,255,0.2)] active:scale-95 disabled:opacity-50">
+
+                    <span wire:loading.remove>Enter Universe</span>
+                    <span wire:loading class="flex items-center justify-center space-x-2">
+                        <svg class="animate-spin h-4 w-4 text-zinc-950" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        <span>Verifying...</span>
+                    </span>
+                </button>
+            </div>
+        </form>
+
+        <!-- Footer Navigation -->
+        <div class="mt-8 text-center"
+             x-show="wakingUp"
+             x-transition:enter="transition delay-[500ms] duration-700"
+             x-transition:enter-start="opacity-0"
+             x-transition:enter-end="opacity-100">
+            <p class="text-zinc-600 text-[10px] font-bold uppercase tracking-widest">
+                New to the platform?
+                <a href="/register" class="text-indigo-400 hover:text-white transition-colors ml-1">Create Account</a>
+            </p>
+        </div>
+    </div>
+</div>
+
+
+========================================
+FILE: auth/register.blade.php
+PATH: resources/views/livewire/auth/register.blade.php
+========================================
+<div x-data="{
+        wakingUp: false,
+        magneticX: 0,
+        magneticY: 0
+    }"
+     x-init="setTimeout(() => wakingUp = true, 100)"
+     class="relative min-h-screen flex items-center justify-center px-6 overflow-hidden">
+
+    <!-- THE LIGHTING: Floating Clouds (Consistency with Home) -->
+    <div class="fixed inset-0 pointer-events-none z-0">
+        <div class="absolute -top-[10%] -left-[10%] w-[60%] h-[60%] animate-cloud-indigo blur-[120px]"></div>
+        <div class="absolute bottom-0 -right-[10%] w-[50%] h-[50%] animate-cloud-violet blur-[120px]"></div>
+    </div>
+
+    <!-- REGISTER CARD -->
+    <div x-show="wakingUp"
+         x-transition:enter="transition ease-out duration-1000"
+         x-transition:enter-start="opacity-0 scale-95 translate-y-10"
+         x-transition:enter-end="opacity-100 scale-100 translate-y-0"
+         class="relative z-10 w-full max-w-md bg-zinc-900/40 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] p-10 shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]">
+
+        <!-- Brand Header -->
+        <div class="text-center mb-10">
+            <div class="inline-flex items-center justify-center w-12 h-12 bg-white rounded-2xl mb-6 shadow-[0_0_30px_rgba(255,255,255,0.1)]">
+                <svg class="w-7 h-7 text-zinc-950" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            </div>
+            <h1 class="text-3xl font-black tracking-tighter text-white italic">Join <span class="text-indigo-400">ByteBook</span></h1>
+            <p class="text-zinc-500 text-sm mt-2 font-medium tracking-tight">Create your signature in the universe.</p>
+        </div>
+
+        <form wire:submit.prevent="register" class="space-y-6">
+
+            <!-- Field: Name (Staggered 1) -->
+            <div x-show="wakingUp" x-transition:enter="transition delay-[200ms] duration-700" x-transition:enter-start="opacity-0 translate-y-4" x-transition:enter-end="opacity-100 translate-y-0">
+                <label class="block text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500 mb-2 ml-1">Full Name</label>
+                <input wire:model="name" type="text"
+                       class="w-full bg-zinc-800/30 border-none outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-2xl p-4 text-sm text-white placeholder-zinc-700 caret-indigo-500 transition-all shadow-inner"
+                       placeholder="Alex River">
+                @error('name') <span class="text-[10px] text-red-500 font-bold mt-2 ml-1 block uppercase tracking-widest animate-pulse">{{ $message }}</span> @enderror
+            </div>
+
+            <!-- Field: Email (Staggered 2) -->
+            <div x-show="wakingUp" x-transition:enter="transition delay-[300ms] duration-700" x-transition:enter-start="opacity-0 translate-y-4" x-transition:enter-end="opacity-100 translate-y-0">
+                <label class="block text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500 mb-2 ml-1">Email Address</label>
+                <input wire:model="email" type="email"
+                       class="w-full bg-zinc-800/30 border-none outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-2xl p-4 text-sm text-white placeholder-zinc-700 caret-indigo-500 transition-all shadow-inner"
+                       placeholder="alex@bytebook.com">
+                @error('email') <span class="text-[10px] text-red-500 font-bold mt-2 ml-1 block uppercase tracking-widest animate-pulse">{{ $message }}</span> @enderror
+            </div>
+
+            <!-- Field: Password (Staggered 3) -->
+            <div x-show="wakingUp" x-transition:enter="transition delay-[400ms] duration-700" x-transition:enter-start="opacity-0 translate-y-4" x-transition:enter-end="opacity-100 translate-y-0">
+                <label class="block text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500 mb-2 ml-1">Password</label>
+                <input wire:model="password" type="password"
+                       class="w-full bg-zinc-800/30 border-none outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-2xl p-4 text-sm text-white placeholder-zinc-700 caret-indigo-500 transition-all shadow-inner"
+                       placeholder="••••••••">
+                @error('password') <span class="text-[10px] text-red-500 font-bold mt-2 ml-1 block uppercase tracking-widest animate-pulse">{{ $message }}</span> @enderror
+            </div>
+
+            <!-- THE MAGNETIC REGISTER BUTTON -->
+            <div class="pt-4"
+                 @mousemove="
+                    let rect = $el.getBoundingClientRect();
+                    magneticX = ($event.clientX - rect.left - rect.width/2) * 0.4;
+                    magneticY = ($event.clientY - rect.top - rect.height/2) * 0.4;
+                 "
+                 @mouseleave="magneticX = 0; magneticY = 0">
+
+                <button type="submit"
+                        wire:loading.attr="disabled"
+                        :style="`transform: translate(${magneticX}px, ${magneticY}px)`"
+                        class="relative w-full py-5 bg-white text-zinc-950 rounded-[1.2rem] font-black text-xs uppercase tracking-[0.2em] transition-all duration-200 hover:shadow-[0_0_40px_rgba(255,255,255,0.2)] active:scale-95 disabled:opacity-50">
+
+                    <span wire:loading.remove>Initialize Account</span>
+                    <span wire:loading class="flex items-center justify-center space-x-2">
+                        <svg class="animate-spin h-4 w-4 text-zinc-950" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        <span>Processing...</span>
+                    </span>
+                </button>
+            </div>
+        </form>
+
+        <div class="mt-8 text-center">
+            <p class="text-zinc-600 text-[10px] font-bold uppercase tracking-widest">
+                Already part of the network?
+                <a href="/login" class="text-indigo-400 hover:text-white transition-colors ml-1">Sign In</a>
+            </p>
+        </div>
+    </div>
+</div>
+
+
+========================================
+FILE: posts/comments.blade.php
+PATH: resources/views/livewire/posts/comments.blade.php
+========================================
+<div x-data="{ open: false }"
+     @open-comment-modal.window="if($event.detail.postId == {{ $post->id }}) open = true"
+     class="relative">
+
+    <div x-show="open" x-cloak x-teleport="body">
+        <!-- Backdrop -->
+        <div class="fixed inset-0 bg-zinc-950/80 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+            <!-- Modal Card -->
+            <div @click.away="open = false"
+                 class="bg-zinc-900 border border-white/10 w-full max-w-xl rounded-[2.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300">
+
+                <!-- Header -->
+                <div class="px-8 py-6 border-b border-white/5 flex justify-between items-center bg-zinc-900/50">
+                    <h2 class="text-lg font-black tracking-tighter text-white italic">Byte<span class="text-indigo-400">Thread</span></h2>
+                    <button @click="open = false" class="text-zinc-500 hover:text-white transition-colors text-2xl">&times;</button>
+                </div>
+
+                <!-- Comment Feed -->
+                <div class="p-8 max-h-[50vh] overflow-y-auto custom-scrollbar space-y-6">
+                    @forelse($post->comments->where('parent_id', null) as $comment)
+                        <div class="flex space-x-4">
+                            <img src="https://ui-avatars.com/api/?name={{ $comment->user->name }}&background=111&color=fff" class="w-8 h-8 rounded-full border border-white/10">
+                            <div class="flex flex-col flex-1">
+                                <div class="bg-zinc-800/40 p-4 rounded-2xl rounded-tl-none border border-white/5 shadow-inner">
+                                    <h4 class="text-xs font-bold text-white mb-1">{{ $comment->user->name }}</h4>
+                                    <p class="text-sm text-zinc-300 leading-relaxed">{{ $comment->body }}</p>
+                                </div>
+                                <button wire:click="setReply({{ $comment->id }})" class="text-[9px] font-black uppercase tracking-widest text-indigo-400 mt-2 ml-1 hover:text-white">Reply Byte</button>
+                            </div>
+                        </div>
+                    @empty
+                        <p class="text-center text-zinc-600 text-[10px] font-bold uppercase tracking-widest py-10 italic">Be the first byte in this thread.</p>
+                    @endforelse
+                </div>
+
+                <!-- Input Area -->
+                <div class="p-6 bg-zinc-950/50 border-t border-white/5">
+                    @if($replyingTo)
+                        <div class="flex items-center justify-between mb-2 px-2">
+                            <span class="text-[9px] text-indigo-400 font-bold uppercase tracking-widest italic">Replying to Thread...</span>
+                            <button wire:click="$set('replyingTo', null)" class="text-zinc-500 hover:text-white">✕</button>
+                        </div>
+                    @endif
+                    <div class="relative group">
+                        <textarea wire:model="newComment"
+                                  class="w-full bg-zinc-800/50 border-none rounded-2xl p-4 pr-16 text-sm text-zinc-200 placeholder-zinc-700 resize-none focus:ring-1 focus:ring-indigo-500/50 shadow-inner"
+                                  placeholder="Write a comment..."></textarea>
+                        <button wire:click="postComment"
+                                class="absolute right-3 bottom-3 p-2.5 bg-white text-zinc-950 rounded-xl hover:scale-110 active:scale-95 transition-all shadow-xl">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+========================================
+FILE: posts/create.blade.php
+PATH: resources/views/livewire/posts/create.blade.php
+========================================
+<div class="w-full max-w-4xl pt-12 px-4">
+    <div x-data="{
+        activeTool: null,
+        content: @entangle('form.body'),
+        previewImage: null,
+
+        insertEmoji(emoji) {
+            this.content += emoji;
+            this.activeTool = null;
+        },
+        locSearch: '',
+        locations: [],
+        async fetchLocations() {
+            if(this.locSearch.length < 3) return;
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${this.locSearch}`);
+            this.locations = await res.json();
+        }
+    }" class="w-full space-y-8 relative">
+
+        <!-- PRO SUCCESS CARD (Updated Flash Key) -->
+        @if (session()->has('success_CreatedPost'))
+            <div x-data="{ show: true }" x-show="show" x-init="setTimeout(() => show = false, 5000)"
+                 x-transition:enter="transition ease-out duration-300"
+                 x-transition:enter-start="opacity-0 -translate-y-4"
+                 x-transition:enter-end="opacity-100 translate-y-0"
+                 class="bg-indigo-500/10 border border-indigo-500/50 p-4 rounded-2xl flex items-center justify-between shadow-[0_0_20px_rgba(99,102,241,0.2)]">
+                <div class="flex items-center space-x-3">
+                    <div class="bg-indigo-500 p-1.5 rounded-full">
+                        <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
+                    </div>
+                    <span class="text-indigo-100 text-sm font-semibold">{{ session('success_CreatedPost') }}</span>
+                </div>
+                <button @click="show = false" type="button" class="text-indigo-300 hover:text-white">✕</button>
+            </div>
+        @endif
+
+        <form wire:submit.prevent="save">
+            <!-- Header: Drafting Post & Avatar -->
+            <div class="flex items-center space-x-4">
+                <div class="w-12 h-12 rounded-full overflow-hidden border border-white/10 shadow-lg">
+                    <img src="https://ui-avatars.com/api/?name={{ auth()->user()->name }}&background=111&color=fff" class="w-full h-full object-cover">
+                </div>
+                <div class="flex flex-col">
+                    <h3 class="text-gray-200 font-semibold text-base leading-none tracking-tight">{{ auth()->user()->name }}</h3>
+                    <span class="text-[10px] font-bold text-indigo-500 uppercase tracking-[0.2em] mt-1.5">Drafting Post</span>
+                </div>
+            </div>
+
+            <!-- Text Area (Bound to form.body) -->
+            <div class="mt-8">
+            <textarea x-model="content"
+                      class="w-full bg-transparent border-none outline-none focus:ring-0 text-3xl md:text-4xl text-gray-100 placeholder-gray-800 resize-none min-h-[150px] caret-indigo-500 p-0 shadow-none"
+                      placeholder="What's emerging today?"></textarea>
+
+                @error('form.body')
+                <p class="text-red-500 text-xs font-bold uppercase tracking-widest mt-4 animate-pulse">{{ $message }}</p>
+                @enderror
+            </div>
+
+            <!-- IMAGE PREVIEWS (Bound to form.images) -->
+            @if ($form->images)
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+                    @foreach($form->images as $index => $img)
+                        @if($img && is_object($img) && method_exists($img, 'temporaryUrl'))
+                            <div class="relative aspect-video rounded-xl overflow-hidden border border-white/10 group shadow-2xl">
+                                <img @click="previewImage = '{{ $img->temporaryUrl() }}'"
+                                     src="{{ $img->temporaryUrl() }}"
+                                     class="w-full h-full object-cover cursor-zoom-in hover:scale-105 transition-transform">
+
+                                <!-- Remove Button (Calling form.removeImage) -->
+                                <button type="button"
+                                        wire:click="removeImage({{ $index }})"
+                                        class="absolute top-2 right-2 bg-black/60 backdrop-blur-md p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-red-500 text-white z-10">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+                                </button>
+                            </div>
+                        @endif
+                    @endforeach
+                </div>
+            @endif
+
+            <div class="h-px w-full bg-gradient-to-r from-transparent via-white/5 to-transparent my-10"></div>
+
+            <div class="flex items-center justify-between pt-4 relative">
+
+                <!-- EMOJI POPOVER -->
+                <div x-show="activeTool === 'emoji'" x-transition @click.away="activeTool = null" class="absolute bottom-20 left-10 w-64 bg-[#161b22] border border-white/10 rounded-2xl shadow-2xl p-4 z-50">
+                    <div class="grid grid-cols-5 gap-3">
+                        <template x-for="emoji in ['🔥','🚀','😂','❤️','✨','🙌','👀','✅','💻','📍','🌈','⭐','⚡']">
+                            <button @click="insertEmoji(emoji)" type="button" class="text-2xl hover:bg-white/5 p-2 rounded-xl transition-all" x-text="emoji"></button>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- LOCATION POPOVER -->
+                <div x-show="activeTool === 'location'" x-transition @click.away="activeTool = null" class="absolute bottom-20 left-0 w-80 bg-[#161b22] border border-white/10 rounded-2xl shadow-2xl p-4 z-50">
+                    <input x-model="locSearch" @input.debounce.500ms="fetchLocations()" type="text" placeholder="Search locations..." class="w-full bg-white/5 border-none rounded-xl text-sm text-white focus:ring-1 focus:ring-indigo-500 p-3 mb-2">
+                    <div class="max-h-40 overflow-y-auto">
+                        <template x-for="loc in locations">
+                            <button @click="content += ' 📍 ' + loc.display_name.split(',')[0]; activeTool = null" type="button" class="w-full text-left p-3 hover:bg-indigo-600 rounded-xl text-[11px] text-gray-400 truncate" x-text="loc.display_name"></button>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- TOOLBAR -->
+                <div class="flex items-center space-x-1 bg-white/[0.03] p-1.5 rounded-2xl border border-white/5 shadow-inner">
+                    <label class="p-2.5 text-gray-400 hover:text-indigo-400 hover:bg-white/5 rounded-xl cursor-pointer transition-all">
+                        <input type="file" wire:model="form.images" multiple class="hidden">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    </label>
+                    <button type="button" @click="activeTool = (activeTool === 'emoji' ? null : 'emoji')" class="p-2.5 text-gray-400 hover:text-indigo-400 hover:bg-white/5 rounded-xl transition-all">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    </button>
+                    <button type="button" @click="activeTool = (activeTool === 'location' ? null : 'location')" class="p-2.5 text-gray-400 hover:text-indigo-400 hover:bg-white/5 rounded-xl transition-all">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path></svg>
+                    </button>
+                </div>
+
+                <div class="flex items-center space-x-6">
+                    <button type="button" class="text-xs font-bold uppercase tracking-widest text-gray-600 hover:text-white transition-colors">Cancel</button>
+                    <button type="submit" wire:loading.attr="disabled" class="px-10 py-3 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-full text-[10px] font-black tracking-[0.2em] text-white uppercase shadow-[0_0_20px_rgba(99,102,241,0.3)] hover:scale-105 active:scale-95 transition-all">
+                        <span wire:loading.remove>Publish Post</span>
+                        <span wire:loading>Publishing...</span>
+                    </button>
+                </div>
+            </div>
+        </form>
+
+        <!-- FULL SCREEN IMAGE PREVIEW MODAL -->
+        <div x-show="previewImage"
+             @click.away="previewImage = null"
+             class="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4"
+             x-transition.opacity>
+            <button @click="previewImage = null" type="button" class="absolute top-6 right-6 text-white text-4xl hover:text-red-500 transition-colors">&times;</button>
+            <img :src="previewImage" class="max-w-full max-h-full rounded-lg shadow-2xl">
+        </div>
+    </div>
+</div>
+
+
+========================================
+FILE: posts/edit.blade.php
+PATH: resources/views/livewire/posts/edit.blade.php
+========================================
+<div x-data="{ open: false }"
+     @open-edit-modal.window="if($event.detail.postId == {{ $post->id }}) open = true"
+     class="relative">
+
+    <div x-show="open" x-cloak x-teleport="body">
+        <div class="fixed inset-0 bg-zinc-950/90 backdrop-blur-md z-[110] flex items-center justify-center p-4">
+            <div @click.away="open = false"
+                 class="bg-zinc-900 border border-white/10 w-full max-w-xl rounded-[3rem] p-10 shadow-2xl animate-in zoom-in-95 duration-500">
+
+                <h2 class="text-xl font-black tracking-tighter text-white italic mb-10">Refine <span class="text-indigo-400">Byte</span></h2>
+
+                <textarea wire:model="form.body"
+                          class="w-full bg-zinc-800/30 border-none rounded-3xl p-6 text-xl text-zinc-200 placeholder-zinc-700 resize-none min-h-[200px] focus:ring-1 focus:ring-indigo-500/50 shadow-inner mb-6"></textarea>
+
+                <div class="flex justify-end space-x-6">
+                    <button @click="open = false" class="text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-white">Cancel</button>
+                    <button wire:click="update" class="px-10 py-4 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all">Save Changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+========================================
+FILE: posts/like.blade.php
+PATH: resources/views/livewire/posts/like.blade.php
+========================================
+<div x-data="{ liked: @entangle('isLiked') }" class="flex items-center space-x-2">
+    <button
+        wire:click="toggleLike"
+        @click="liked = !liked"
+        class="group relative flex items-center justify-center transition-all duration-500 active:scale-75"
+    >
+        <!-- The Electric Logo Icon -->
+        <div :class="liked ? 'bg-indigo-500 shadow-[0_0_20px_rgba(99,102,241,0.8)] border-indigo-400 scale-110' : 'bg-zinc-800 border-white/5'"
+             class="w-8 h-8 rounded-lg border flex items-center justify-center transition-all duration-500">
+
+            <svg :class="liked ? 'text-white fill-current' : 'text-zinc-500'"
+                 class="w-5 h-5 transition-colors duration-500"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+            </svg>
+        </div>
+
+        <!-- Particles Effect (Alpine) -->
+        <template x-if="liked">
+            <div class="absolute inset-0 pointer-events-none">
+                <div class="absolute top-0 left-1/2 -translate-x-1/2 w-1 h-4 bg-indigo-400 rounded-full animate-ping"></div>
+            </div>
+        </template>
+    </button>
+    <span :class="liked ? 'text-indigo-400' : 'text-zinc-500'" class="text-[10px] font-black uppercase tracking-widest transition-colors duration-500">
+        {{ $post->likes()->count() }} Bytes
+    </span>
+</div>
+
+
+========================================
+FILE: posts/single-post.blade.php
+PATH: resources/views/livewire/posts/single-post.blade.php
+========================================
+<div class="bg-zinc-900/40 border border-white/10 rounded-[2.5rem] p-6 backdrop-blur-xl mb-8 hover:border-white/20 transition-all duration-500 group mx-auto w-full max-w-2xl">
+
+    <!-- HEADER -->
+    <div class="flex items-center justify-between mb-6">
+        <div class="flex items-center space-x-4">
+            <a href="{{ route('profile.show', $post->user) }}" class="w-12 h-12 rounded-2xl overflow-hidden border border-white/5 bg-zinc-800 flex items-center justify-center">
+                @if($post->user->avatar)
+                    <img src="{{ Storage::url($post->user->avatar) }}" class="w-full h-full object-cover">
+                @else
+                    <span class="text-indigo-400 font-bold italic">{{ substr($post->user->name, 0, 1) }}</span>
+                @endif
+            </a>
+            <div class="flex flex-col">
+                <a href="{{ route('profile.show', $post->user) }}" class="text-zinc-100 font-black tracking-tighter text-base hover:text-indigo-400 transition-colors uppercase italic">
+                    {{ $post->user->name }}
+                </a>
+                <span class="text-[10px] text-zinc-600 font-black uppercase tracking-widest">{{ $post->created_at->diffForHumans() }}</span>
+            </div>
+        </div>
+
+        @if(auth()->id() === $post->user_id)
+            <button @click="$dispatch('open-edit-modal', { postId: {{ $post->id }} })" class="p-2.5 rounded-xl bg-zinc-800/50 text-zinc-500 hover:text-white transition-all opacity-0 group-hover:opacity-100">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+            </button>
+        @endif
+    </div>
+
+    <!-- BODY -->
+    <p class="text-lg text-zinc-200 leading-relaxed tracking-tight px-2 mb-6">{{ $post->body }}</p>
+
+    <!-- MEDIA GRID (Gallery Wired) -->
+    @if($post->images->count())
+        @php $imgUrls = $post->images->map(fn($i) => Storage::url($i->path))->toArray(); @endphp
+        <div class="grid {{ $post->images->count() == 1 ? 'grid-cols-1' : 'grid-cols-2' }} gap-2 rounded-3xl overflow-hidden border border-white/5 shadow-2xl">
+            @foreach($post->images->take(4) as $index => $img)
+                <div class="relative aspect-square cursor-zoom-in group/img overflow-hidden"
+                     @click="$dispatch('open-gallery', { images: {{ json_encode($imgUrls) }}, index: {{ $index }} })">
+                    <img src="{{ Storage::url($img->path) }}" class="w-full h-full object-cover transition-transform duration-700 group-hover/img:scale-110">
+
+                    @if($loop->index == 3 && $post->images->count() > 4)
+                        <div class="absolute inset-0 bg-zinc-950/60 backdrop-blur-sm flex items-center justify-center">
+                            <span class="text-white text-2xl font-black italic tracking-tighter">+{{ $post->images->count() - 4 }} Bytes</span>
+                        </div>
+                    @else
+                        <div class="absolute inset-0 bg-black/20 opacity-0 group-hover/img:opacity-100 transition-opacity"></div>
+                    @endif
+                </div>
+            @endforeach
+        </div>
+    @endif
+
+    <!-- ACTIONS: BIGGER BUTTONS -->
+    <div class="mt-8 pt-6 border-t border-white/5 flex items-center justify-between gap-4 px-2">
+        <div class="flex-1">
+            <livewire:posts.like :post="$post" :key="'like-'.$post->id" />
+        </div>
+
+        <button @click="$dispatch('open-comment-modal', { postId: {{ $post->id }} })"
+                class="flex-1 flex items-center justify-center space-x-3 py-3 rounded-2xl bg-zinc-800/30 hover:bg-zinc-800/80 border border-white/5 text-zinc-500 hover:text-white transition-all group shadow-sm">
+            <svg class="w-5 h-5 transition-transform group-hover:scale-110" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
+            <span class="text-xs font-black uppercase tracking-widest">{{ $post->comments()->count() }} Threads</span>
+        </button>
+    </div>
+</div>
+
+
+========================================
+FILE: users/edit.blade.php
+PATH: resources/views/livewire/users/edit.blade.php
+========================================
+<div x-data="{
+    avatarPreview: null,
+    bannerPreview: null,
+    openBio: false
+}"
+     @open-bio-modal.window="openBio = true"
+     class="relative">
+
+    <!-- Hidden File Inputs -->
+    <form wire:submit.prevent="update" class="hidden">
+        <input type="file" wire:model="newAvatar" id="avatar-upload" @change="avatarPreview = URL.createObjectURL($event.target.files[0])">
+        <input type="file" wire:model="newBanner" id="banner-upload" @change="bannerPreview = URL.createObjectURL($event.target.files[0])">
+    </form>
+
+    <!-- Bio Modal -->
+    <div x-show="openBio" x-cloak class="fixed inset-0 z-[150] flex items-center justify-center p-6 bg-zinc-950/80 backdrop-blur-md">
+        <div class="bg-zinc-900 border border-white/10 w-full max-w-lg rounded-[2.5rem] p-10 shadow-2xl" @click.away="openBio = false">
+            <h2 class="text-xl font-black text-white italic mb-6 uppercase tracking-tighter">Update <span class="text-indigo-400">Signature</span></h2>
+            <textarea wire:model="newBio" class="w-full bg-zinc-800/40 border-none rounded-2xl p-4 text-white resize-none min-h-[120px] focus:ring-1 focus:ring-indigo-500/50 mb-6"></textarea>
+            <div class="flex justify-end space-x-6">
+                <button @click="openBio = false" class="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Discard</button>
+                <button wire:click="update" @click="openBio = false" class="px-8 py-3 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest hover:scale-105 transition-all">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Avatar Preview Adjust -->
+    <div x-show="avatarPreview" x-cloak class="fixed inset-0 z-[160] flex items-center justify-center p-6 bg-zinc-950/90 backdrop-blur-2xl">
+        <div class="bg-zinc-900 border border-white/10 w-full max-w-md rounded-[3rem] p-12 text-center shadow-2xl">
+            <div class="w-56 h-56 mx-auto mb-10 rounded-[3rem] overflow-hidden border-4 border-indigo-500/30 shadow-2xl">
+                <img :src="avatarPreview" class="w-full h-full object-cover">
+            </div>
+            <div class="flex justify-center space-x-8">
+                <button @click="avatarPreview = null" class="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Discard</button>
+                <button wire:click="update" @click="avatarPreview = null" class="px-10 py-4 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest hover:scale-105 transition-all">Apply Identity</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Banner Preview Adjust -->
+    <div x-show="bannerPreview" x-cloak class="fixed inset-0 z-[160] flex items-center justify-center p-6 bg-zinc-950/90 backdrop-blur-2xl">
+        <div class="bg-zinc-900 border border-white/10 w-full max-w-2xl rounded-[3rem] p-12 text-center shadow-2xl">
+            <div class="h-48 w-full mb-10 rounded-3xl overflow-hidden border-2 border-dashed border-white/20">
+                <img :src="bannerPreview" class="w-full h-full object-cover">
+            </div>
+            <div class="flex justify-center space-x-8">
+                <button @click="bannerPreview = null" class="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Discard</button>
+                <button wire:click="update" @click="bannerPreview = null" class="px-10 py-4 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest hover:scale-105 transition-all">Apply Banner</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+========================================
+FILE: users/follow.blade.php
+PATH: resources/views/livewire/users/follow.blade.php
+========================================
+<div x-data="{ magneticX: 0, magneticY: 0 }">
+    <button
+        wire:click="toggleFollow"
+        @mousemove="
+            let rect = $el.getBoundingClientRect();
+            magneticX = ($event.clientX - rect.left - rect.width/2) * 0.3;
+            magneticY = ($event.clientY - rect.top - rect.height/2) * 0.3;
+        "
+        @mouseleave="magneticX = 0; magneticY = 0"
+        :style="`transform: translate(${magneticX}px, ${magneticY}px)`"
+        class="relative px-8 py-2.5 rounded-full font-black text-[10px] uppercase tracking-[0.2em] transition-all duration-200 shadow-lg active:scale-95
+        {{ $this->isFollowing ? 'bg-zinc-800 text-zinc-400 border border-white/5' : 'bg-white text-zinc-950 hover:shadow-[0_0_30px_rgba(255,255,255,0.2)]' }}">
+
+        <span wire:loading.remove>
+            {{ $this->isFollowing ? 'Following' : 'Follow Identity' }}
+        </span>
+
+        <span wire:loading class="flex items-center space-x-2">
+            <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+            <span>Syncing...</span>
+        </span>
+    </button>
+</div>
+
+
+========================================
+FILE: users/show.blade.php
+PATH: resources/views/livewire/users/show.blade.php
+========================================
+<div x-data="{
+    tab: 'posts',
+    wakingUp: false,
+    previewImage: null,
+    images: [],
+    galleryIndex: 0
+}"
+     x-init="setTimeout(() => wakingUp = true, 100)"
+     class="w-full min-h-screen pb-20">
+
+    <!-- THE HEADER (Full Width standard) -->
+    <div class="max-w-4xl mx-auto mb-12">
+        <div class="relative w-full rounded-[3.5rem] overflow-hidden border border-white/10 bg-zinc-900/40 backdrop-blur-xl shadow-2xl">
+
+            <!-- BANNER -->
+            <div class="relative h-64 md:h-80 w-full group overflow-hidden bg-zinc-800">
+                @if($user->banner)
+                    <img src="{{ Storage::url($user->banner) }}" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-1000">
+                @else
+                    <div class="w-full h-full bg-gradient-to-br from-indigo-950/40 via-zinc-900 to-indigo-900/20"></div>
+                @endif
+
+                @if(auth()->id() === $user->id)
+                    <label for="banner-upload" class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer z-10">
+                        <span class="bg-white text-zinc-950 px-6 py-2 rounded-full font-black text-[10px] uppercase tracking-widest">Change Banner</span>
+                    </label>
+                @endif
+            </div>
+
+            <!-- IDENTITY AREA -->
+            <div class="relative px-8 md:px-12 pb-10 flex flex-col md:flex-row items-end md:items-center justify-between -mt-16 md:-mt-20 gap-6">
+                <div class="flex flex-col md:flex-row items-end md:items-center gap-6">
+                    <!-- AVATAR -->
+                    <div class="relative group">
+                        <div class="w-32 h-32 md:w-44 md:h-48 rounded-[3rem] overflow-hidden border-8 border-[#09090b] bg-zinc-900 shadow-2xl flex items-center justify-center">
+                            @if($user->avatar)
+                                <img src="{{ Storage::url($user->avatar) }}" class="w-full h-full object-cover">
+                            @else
+                                <span class="text-indigo-400 text-5xl font-black italic">{{ substr($user->name, 0, 1) }}</span>
+                            @endif
+                        </div>
+                        @if(auth()->id() === $user->id)
+                            <label for="avatar-upload" class="absolute inset-0 flex items-center justify-center bg-black/40 rounded-[3rem] opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+                                <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                            </label>
+                        @endif
+                    </div>
+
+                    <div class="flex flex-col mb-2">
+                        <h1 class="text-3xl font-black tracking-tighter text-white italic flex items-center uppercase">
+                            {{ $user->name }}
+                            <span class="w-2.5 h-3 bg-indigo-500 rounded-full ml-3 shadow-[0_0_15px_rgba(99,102,241,1)] pulse-glow"></span>
+                        </h1>
+                        <p class="text-zinc-500 text-sm font-medium tracking-tight mt-1 max-w-xs">
+                            {{ $user->bio ?? 'No bio signature yet.' }}
+                            @if(auth()->id() === $user->id)
+                                <button @click="$dispatch('open-bio-modal')" class="ml-2 text-indigo-400 hover:text-white transition-colors text-xs uppercase font-black">Edit</button>
+                            @endif
+                        </p>
+                    </div>
+                </div>
+
+                @if(auth()->id() !== $user->id)
+                    <livewire:users.follow :targetId="$user->id" />
+                @endif
+            </div>
+
+            <!-- TABS -->
+            <div class="border-t border-white/5 flex items-center px-8 bg-zinc-950/20">
+                <button @click="tab = 'posts'" :class="tab === 'posts' ? 'text-white border-indigo-500' : 'text-zinc-600 border-transparent'" class="py-5 px-6 text-[10px] font-black uppercase tracking-[0.3em] border-b-2 transition-all">Bytes</button>
+                <button @click="tab = 'followers'" :class="tab === 'followers' ? 'text-white border-indigo-500' : 'text-zinc-600 border-transparent'" class="py-5 px-6 text-[10px] font-black uppercase tracking-[0.3em] border-b-2 transition-all">{{ $user->followers()->count() }} Followers</button>
+                <button @click="tab = 'following'" :class="tab === 'following' ? 'text-white border-indigo-500' : 'text-zinc-600 border-transparent'" class="py-5 px-6 text-[10px] font-black uppercase tracking-[0.3em] border-b-2 transition-all">{{ $user->following()->count() }} Following</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- FEED CONTENT (Centered max-w-2xl) -->
+    <div class="max-w-2xl mx-auto px-4">
+
+        <!-- POSTS TAB -->
+        <div x-show="tab === 'posts'" x-transition>
+            @forelse($posts as $post)
+                <div class="bg-zinc-900/40 border border-white/10 rounded-[2.5rem] p-6 backdrop-blur-xl mb-8 hover:border-white/20 transition-all duration-500 group">
+                    <!-- Post Header -->
+                    <div class="flex items-center justify-between mb-6 px-2">
+                        <div class="flex items-center space-x-4">
+                            <div class="w-10 h-10 rounded-2xl overflow-hidden border border-white/5 bg-zinc-800 flex items-center justify-center font-bold italic text-indigo-400">
+                                @if($post->user->avatar)
+                                    <img src="{{ Storage::url($post->user->avatar) }}" class="w-full h-full object-cover">
+                                @else
+                                    {{ substr($post->user->name, 0, 1) }}
+                                @endif
+                            </div>
+                            <div class="flex flex-col">
+                                <span class="text-zinc-100 font-black tracking-tighter text-sm uppercase italic">{{ $post->user->name }}</span>
+                                <span class="text-[9px] text-zinc-600 font-bold uppercase tracking-widest">{{ $post->created_at->diffForHumans() }}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Post Body -->
+                    <p class="text-lg text-zinc-200 leading-relaxed tracking-tight px-2 mb-6">{{ $post->body }}</p>
+
+                    <!-- Media Grid -->
+                    @if($post->images->count())
+                        <div class="grid {{ $post->images->count() == 1 ? 'grid-cols-1' : 'grid-cols-2' }} gap-2 rounded-[2rem] overflow-hidden border border-white/5">
+                            @foreach($post->images as $img)
+                                <div class="relative aspect-square cursor-zoom-in group/img overflow-hidden"
+                                     @click="previewImage = '{{ Storage::url($img->path) }}'">
+                                    <img src="{{ Storage::url($img->path) }}" class="w-full h-full object-cover transition-transform duration-700 group-hover/img:scale-110">
+                                </div>
+                            @endforeach
+                        </div>
+                    @endif
+
+                    <!-- Actions -->
+                    <div class="mt-8 pt-6 border-t border-white/5 flex items-center justify-between gap-4 px-2">
+                        <div class="flex-1"><livewire:posts.like :post="$post" :key="'like-'.$post->id" /></div>
+                        <button @click="$dispatch('open-comment-modal', { postId: {{ $post->id }} })"
+                                class="flex-1 flex items-center justify-center space-x-3 py-3 rounded-2xl bg-zinc-800/30 hover:bg-zinc-800/80 border border-white/5 text-zinc-500 hover:text-white transition-all">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
+                            <span class="text-[10px] font-black uppercase tracking-widest">Thread</span>
+                        </button>
+                    </div>
+                </div>
+            @empty
+                <p class="text-center text-zinc-700 text-[10px] font-bold py-20 uppercase tracking-widest italic">Zero bytes found.</p>
+            @endforelse
+        </div>
+
+        <!-- FOLLOWERS/FOLLOWING TABS -->
+        <div x-show="tab === 'followers'" x-transition class="grid grid-cols-2 gap-4">
+            @foreach($followersList as $item)
+                <a href="{{ route('profile.show', $item) }}" class="p-4 bg-zinc-900/40 border border-white/5 rounded-3xl flex items-center space-x-4">
+                    <div class="w-10 h-10 rounded-xl bg-zinc-800 flex items-center justify-center font-bold text-indigo-400 italic">
+                        {{ substr($item->name, 0, 1) }}
+                    </div>
+                    <span class="text-white text-xs font-bold uppercase tracking-tight">{{ $item->name }}</span>
+                </a>
+            @endforeach
+        </div>
+
+        <div x-show="tab === 'following'" x-transition class="grid grid-cols-2 gap-4">
+            @foreach($followingList as $item)
+                <a href="{{ route('profile.show', $item) }}" class="p-4 bg-zinc-900/40 border border-white/5 rounded-3xl flex items-center space-x-4">
+                    <div class="w-10 h-10 rounded-xl bg-zinc-800 flex items-center justify-center font-bold text-indigo-400 italic">
+                        {{ substr($item->name, 0, 1) }}
+                    </div>
+                    <span class="text-white text-xs font-bold uppercase tracking-tight">{{ $item->name }}</span>
+                </a>
+            @endforeach
+        </div>
+
+    </div>
+
+    <!-- IMAGE ZOOM MODAL -->
+    <div x-show="previewImage" x-cloak class="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/95 backdrop-blur-xl p-8" @click="previewImage = null">
+        <button class="absolute top-8 right-8 text-white/50 hover:text-white text-4xl">&times;</button>
+        <img :src="previewImage" class="max-w-full max-h-full rounded-lg shadow-2xl">
+    </div>
+
+    <!-- INCLUDE EDIT LOGIC -->
+    <livewire:users.edit />
+</div>
+
+
+========================================
+FILE: app.blade.php
+PATH: resources/views/layouts/app.blade.php
+========================================
+<!DOCTYPE html>
+<html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <title>{{ $title ?? config('app.name') }}</title>
+
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
+    <style>
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #0f172a;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 10px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #475569;
+        }
+
+        html {
+            scrollbar-width: thin;
+            scrollbar-color: #334155 #0f172a;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0b0e14;
+            color: #e2e8f0;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+    </style>
+    @livewireStyles
+</head>
+
+<body class="min-h-screen flex flex-col">
+    <x-navigation/>
+
+    <main class="flex-grow flex flex-col items-center">
+        <div class="w-full max-w-2xl px-4 py-12"> <!-- Max-w-2xl is the standard "Feed" width -->
+            {{ $slot }}
+        </div>
+    </main>
+
+@livewireScripts
+    <!-- GLOBAL MEDIA GALLERY -->
+    <div x-data="{
+    open: false,
+    images: [],
+    index: 0,
+    show(imgArray, startAt) {
+        this.images = imgArray;
+        this.index = startAt;
+        this.open = true;
+    },
+    next() { this.index = (this.index + 1) % this.images.length },
+    prev() { this.index = (this.index - 1 + this.images.length) % this.images.length }
+}"
+         @open-gallery.window="show($event.detail.images, $event.detail.index)"
+         x-show="open" x-cloak class="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/95 backdrop-blur-xl transition-all"
+         x-on:keydown.right.window="next()" x-on:keydown.left.window="prev()" x-on:keydown.escape.window="open = false">
+
+        <button @click="open = false" class="absolute top-8 right-8 text-white/50 hover:text-white transition-colors z-[210]">
+            <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
+
+        <!-- Navigation Arrows -->
+        <template x-if="images.length > 1">
+            <div class="absolute inset-x-8 flex justify-between items-center pointer-events-none">
+                <button @click="prev()" class="pointer-events-auto p-4 rounded-full bg-white/5 hover:bg-white/10 text-white transition-all">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                </button>
+                <button @click="next()" class="pointer-events-auto p-4 rounded-full bg-white/5 hover:bg-white/10 text-white transition-all">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                </button>
+            </div>
+        </template>
+
+        <!-- High Res Image -->
+        <div class="relative max-w-5xl max-h-[85vh] flex flex-col items-center">
+            <img :src="images[index]" class="max-w-full max-h-full object-contain shadow-2xl rounded-lg animate-in zoom-in-95 duration-300">
+            <div class="mt-6 px-4 py-2 bg-white/5 rounded-full text-[10px] font-black text-white/40 uppercase tracking-[0.3em]">
+                Byte <span x-text="index + 1" class="text-indigo-400"></span> of <span x-text="images.length"></span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
+
+========================================
+FILE: navigation.blade.php
+PATH: resources/views/components/navigation.blade.php
+========================================
+<nav class="w-full border-b border-white/5 bg-[#0b0e14]/80 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center">
+
+        <!-- Left Column: Logo (Takes 1/3 of the space) -->
+        <div class="flex-1 flex justify-start">
+            <a href="/" class="flex-shrink-0 flex items-center group cursor-pointer">
+                <div class="w-8 h-8 bg-gradient-to-br from-indigo-500 to-violet-600 rounded-lg flex items-center justify-center shadow-[0_0_15px_rgba(99,102,241,0.4)] group-hover:scale-110 group-hover:shadow-[0_0_25px_rgba(99,102,241,0.8)] transition-all duration-300">
+                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                </div>
+                <span class="ml-3 text-lg font-black tracking-tighter text-white italic">
+                    Byte<span class="text-indigo-400 brightness-150 drop-shadow-[0_0_12px_rgba(129,140,248,0.7)] transition-all duration-300">Book</span>Letter
+                </span>
+            </a>
+        </div>
+
+        <!-- Center Column: Links (Takes 1/3 of the space - PERFECTLY CENTERED) -->
+        <div class="flex-1 flex justify-center">
+            <div class="hidden md:flex items-center space-x-8 text-sm font-medium text-gray-400">
+                @auth
+                    <a href="#" class="hover:text-white transition-colors">Feed</a>
+                    <a href="#" class="hover:text-white transition-colors">Following</a>
+                    <a href="{{ route('post.create') }}" class="text-white hover:text-indigo-400 transition-colors">Create</a>
+                @endauth
+            </div>
+        </div>
+
+        <!-- Right Column: Auth Actions (Takes 1/3 of the space) -->
+        <div class="flex-1 flex justify-end items-center">
+            @auth
+                <!-- Avatar for Signed In Users -->
+                <button class="relative group">
+                    <div class="w-9 h-9 rounded-full border-2 border-gray-700 overflow-hidden group-hover:border-indigo-500 transition-all">
+                        <img src="https://ui-avatars.com/api/?name={{ auth()->user()->name }}&background=312e81&color=fff" alt="User">
+                    </div>
+                </button>
+            @endauth
+
+            @guest
+                <!-- Login & Register for Guests -->
+                <div class="flex items-center space-x-5">
+                    <a href="{{ route('login') }}" class="text-sm font-semibold text-gray-400 hover:text-white transition-colors">
+                        Log in
+                    </a>
+                    <a href="{{ route('register') }}" class="relative group px-5 py-2">
+                        <div class="absolute inset-0 bg-gradient-to-r from-indigo-600 to-violet-600 rounded-lg blur-sm opacity-40 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <div class="relative bg-gradient-to-r from-indigo-500 to-violet-600 px-5 py-2 rounded-lg text-sm font-bold text-white shadow-lg active:scale-95 transition-all">
+                            Get Started
+                        </div>
+                    </a>
+                </div>
+            @endguest
+        </div>
+
+    </div>
+</nav>
+
+
+========================================
+FILE: routes/web.php
+========================================
+<?php
+
+use App\Livewire\Auth\Login;
+use App\Livewire\Auth\Register;
+use App\Livewire\Posts\Create;
+use App\Livewire\Posts\Edit;
+use Illuminate\Support\Facades\Route;
+
+
+Route::get('/', function () {
+    return view('home');
+});
+
+use App\Livewire\Users\Show as ProfileShow;
+
+Route::get('/profile/{user}', ProfileShow::class)->name('profile.show');
+
+Route::middleware('guest')->group(function () {
+    Route::get('/register', Register::class)->name('register');
+    Route::get('/login', Login::class)->name('login');
+});
+
+
+Route::middleware('auth')->name('post.')->group(function () {
+    Route::get('/post/create', Create::class)->name('create');
+    Route::get('/post/{post}/edit', Edit::class)->name('edit');
+});
+
+
+========================================
+FILE: AppLayout.php
+PATH: app/View/Components/AppLayout.php
+========================================
+<?php
+
+namespace App\View\Components;
+
+use Illuminate\View\Component;
+use Illuminate\View\View;
+
+class AppLayout extends Component
+{
+    /**
+     * Get the view / contents that represents the component.
+     */
+    public function render(): View
+    {
+        return view('layouts.app');
+    }
+}
+
+
+
+--- END OF EXPORT ---
