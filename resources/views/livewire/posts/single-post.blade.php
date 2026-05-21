@@ -5,7 +5,7 @@
         <div class="flex items-center space-x-4">
             <a href="{{ route('profile.show', $post->user) }}" class="w-12 h-12 rounded-2xl overflow-hidden border border-white/5 bg-zinc-800 flex items-center justify-center">
                 @if($post->user->avatar)
-                    <img src="{{ Storage::url($post->user->avatar) }}" class="w-full h-full object-cover">
+                    <img src="{{ $post->user->avatarUrl() }}" class="w-full h-full object-cover">
                 @else
                     <span class="text-indigo-400 font-bold italic">{{ substr($post->user->name, 0, 1) }}</span>
                 @endif
@@ -19,9 +19,14 @@
         </div>
 
         @if(auth()->id() === $post->user_id)
-            <button @click="$dispatch('open-edit-modal', { postId: {{ $post->id }} })" class="p-2.5 rounded-xl bg-zinc-800/50 text-zinc-500 hover:text-white transition-all opacity-0 group-hover:opacity-100">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
-            </button>
+            <div class="flex items-center gap-2">
+                <button @click="$dispatch('open-edit-modal', { postId: {{ $post->id }} })" class="p-2.5 rounded-xl bg-zinc-800/50 text-zinc-500 hover:text-white transition-all opacity-0 group-hover:opacity-100">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                </button>
+                <button x-on:click="if(confirm('Delete this post?')) Livewire.dispatch('delete-post', { postId: {{ $post->id }} })" class="p-2.5 rounded-xl bg-zinc-800/50 text-zinc-500 hover:text-rose-400 transition-all opacity-0 group-hover:opacity-100">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                </button>
+            </div>
         @endif
     </div>
 
@@ -30,12 +35,12 @@
 
     <!-- MEDIA GRID (Gallery Wired) -->
     @if($post->images->count())
-        @php $imgUrls = $post->images->map(fn($i) => Storage::url($i->path))->toArray(); @endphp
+        @php $imgUrls = $post->images->map(fn($i) => $i->url())->toArray(); @endphp
         <div class="grid {{ $post->images->count() == 1 ? 'grid-cols-1' : 'grid-cols-2' }} gap-2 rounded-3xl overflow-hidden border border-white/5 shadow-2xl">
             @foreach($post->images->take(4) as $index => $img)
                 <div class="relative aspect-square cursor-zoom-in group/img overflow-hidden"
                      @click="$dispatch('open-gallery', { images: {{ json_encode($imgUrls) }}, index: {{ $index }} })">
-                    <img src="{{ Storage::url($img->path) }}" class="w-full h-full object-cover transition-transform duration-700 group-hover/img:scale-110">
+                    <img src="{{ $img->url() }}" class="w-full h-full object-cover transition-transform duration-700 group-hover/img:scale-110">
 
                     @if($loop->index == 3 && $post->images->count() > 4)
                         <div class="absolute inset-0 bg-zinc-950/60 backdrop-blur-sm flex items-center justify-center">

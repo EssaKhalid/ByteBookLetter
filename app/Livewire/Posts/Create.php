@@ -25,6 +25,11 @@ class Create extends Component
         $this->form->removeImage($index);
     }
 
+    public function cyclePrivacy()
+    {
+        $this->form->cyclePrivacy();
+    }
+
     public function render()
     {
         return view('livewire.posts.create');

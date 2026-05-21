@@ -11,6 +11,7 @@ use Livewire\Component;
 use Livewire\WithFileUploads;
 
 #[Layout('layouts::wide')]
+#[Isolate]
 class Edit extends Component
 {
     use WithFileUploads;
@@ -28,7 +29,6 @@ class Edit extends Component
         $this->newBio = auth()->user()->bio;
     }
 
-    #[Isolate]
     public function update()
     {
         $user = auth()->user();

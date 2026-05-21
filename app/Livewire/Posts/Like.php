@@ -20,7 +20,7 @@ class Like extends Component
     #[Computed]
     public function isLiked(): bool
     {
-        if (! auth()->check()) {
+        if (!auth()->check()) {
             return false;
         }
 
@@ -31,8 +31,8 @@ class Like extends Component
 
     public function toggleLike(): void
     {
-        if (! auth()->check()) {
-            $this->redirect(route('login'), navigate: true);
+        if (!auth()->check()) {
+            $this->redirect($this->loginUrl(), navigate: true);
 
             return;
         }
@@ -49,6 +49,11 @@ class Like extends Component
 
         $this->post->loadCount('likes');
         unset($this->isLiked);
+    }
+
+    public function loginUrl(): string
+    {
+        return route('login');
     }
 
     public function render()

@@ -45,7 +45,17 @@
                 <input wire:model="email" type="email"
                        class="w-full bg-zinc-800/30 border-none outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-2xl p-4 text-sm text-white placeholder-zinc-700 caret-indigo-500 transition-all shadow-inner"
                        placeholder="alex@bytebook.com">
-                @error('email') <span class="text-[10px] text-red-500 font-bold mt-2 ml-1 block uppercase tracking-widest animate-pulse">{{ $message }}</span> @enderror
+
+                <!-- LIVE REAL-TIME COUNTDOWN ERROR BLOCK -->
+                @error('email')
+                <div x-data="{ seconds: @entangle('secondsRemaining') }"
+                     x-init="if (seconds > 0) { setInterval(() => { if (seconds > 0) seconds-- }, 1000) }"
+                     class="text-[10px] text-red-500 font-bold mt-2 ml-1 uppercase tracking-widest animate-pulse">
+
+                    <span x-show="seconds > 0">Spam protection: Please wait <span x-text="seconds"></span> seconds.</span>
+                    <span x-show="seconds <= 0">{{ $message }}</span>
+                </div>
+                @enderror
             </div>
 
             <!-- Field: Password (Staggered 3) -->
@@ -83,7 +93,7 @@
         <div class="mt-8 text-center">
             <p class="text-zinc-600 text-[10px] font-bold uppercase tracking-widest">
                 Already part of the network?
-                <a href="/login" class="text-indigo-400 hover:text-white transition-colors ml-1">Sign In</a>
+                <a href="{{ route('login') }}" wire:navigate class="text-indigo-400 hover:text-white transition-colors ml-1">Sign In</a>
             </p>
         </div>
     </div>

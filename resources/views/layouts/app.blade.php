@@ -41,10 +41,15 @@
     @livewireStyles
 </head>
 
-<body class="min-h-screen flex flex-col bg-zinc-950 text-zinc-100">
+<body class="min-h-screen flex flex-col bg-zinc-950 text-zinc-100"
+      x-data="{ pageTransition: false }"
+      x-on:livewire:navigate-start.window="pageTransition = true"
+      x-on:livewire:navigate-end.window="pageTransition = false">
     <x-navigation/>
 
-    <main class="flex-grow flex flex-col items-center w-full">
+    <main class="flex-grow flex flex-col items-center w-full"
+          :class="pageTransition ? 'opacity-50 scale-[0.98]' : 'opacity-100 scale-100'"
+          style="transition: opacity 0.3s ease, transform 0.3s ease;">
         <div class="w-full {{ Route::is('home') ? '' : 'max-w-2xl px-4 py-12' }}">
             {{ $slot }}
         </div>

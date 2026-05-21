@@ -1,5 +1,5 @@
 --- PROJECT EXPORT FOR AI DEBUGGING ---
-Generated at: 2026-05-16 16:05:04
+Generated at: 2026-05-21 20:34:50
 
 ========================================
 FILE: Auth/Login.php
@@ -10,6 +10,7 @@ PATH: app/Livewire/Auth/Login.php
 namespace App\Livewire\Auth;
 
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\RateLimiter;
 use Livewire\Attributes\Validate;
 use Livewire\Component;
 
@@ -24,15 +25,26 @@ class Login extends Component
     public function login()
     {
         $this->validate();
-        if (Auth::attempt(['email' => $this->email, 'password' => $this->password]))
-        {
-            session()->regenerate();
-            session()->flash('success', 'Successfully logged in! Welcome back.');
-            return redirect()->intended('/');
+
+        $key = 'login.' . $this->email . '|' . request()->ip();
+
+        if (RateLimiter::tooManyAttempts($key, 5)) {
+            $seconds = RateLimiter::availableIn($key);
+            $this->addError('email', "Too many attempts. Please wait $seconds seconds.");
+            return;
         }
 
+        if (Auth::attempt(['email' => $this->email, 'password' => $this->password])) {
+            RateLimiter::clear($key);
+            session()->regenerate();
+            session()->flash('success', 'Successfully logged in! Welcome back.');
+            return redirect()->intended('/feed');
+        }
+
+        RateLimiter::hit($key); // Record a "Strike" against this user/IP
         $this->addError('email', 'Invalid email or password.');
     }
+
     public function render()
     {
         return view('livewire.auth.login');
@@ -50,6 +62,7 @@ namespace App\Livewire\Auth;
 
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\RateLimiter;
 use Livewire\Attributes\Validate;
 use Livewire\Component;
 
@@ -64,12 +77,22 @@ class Register extends Component
 
     public function register()
     {
+        $key = 'register.' . request()->ip();
+
+        if (RateLimiter::tooManyAttempts($key, 3)) {
+            $seconds = RateLimiter::availableIn($key);
+            $this->addError('email', "Spam protection: Please wait $seconds seconds.");
+            return;
+        }
+
         $this->validate();
+
+        RateLimiter::hit($key);
 
         $user = User::create([
             'name' => $this->name,
             'email' => $this->email,
-            'password' => bcrypt($this->password),
+            'password' => $this->password,
         ]);
 
         Auth::login($user);
@@ -77,8 +100,9 @@ class Register extends Component
         session()->flash('success', 'Account successfully created!');
         session()->flash('welcome', "Welcome to ByteBookLetter, {$user->name}!");
 
-        return redirect()->intended('/');
-     }
+        return redirect()->intended('/feed');
+
+    }
 
 
     public function render()
@@ -98,20 +122,26 @@ namespace App\Livewire\Forms\Posts;
 
 use App\Enums\PostPrivacy;
 use App\Models\Post;
+use App\Models\PostImage;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rules\Enum;
 use Livewire\Attributes\Isolate;
+use Livewire\Attributes\On;
+use Livewire\Attributes\Session;
 use Livewire\Attributes\Validate;
 use Livewire\Form;
 
+#[Isolate]
 class PostForm extends Form
 {
 
     public ?Post $post;
 
     #[Validate('required_without:images|max:1255')]
+    #[Session]
     public $body = '';
 
     #[Validate([
@@ -134,12 +164,47 @@ class PostForm extends Form
         ];
     }
 
+    public function cyclePrivacy()
+    {
+        $next = match($this->privacy) {
+            'public' => 'friends',
+            'friends' => 'private',
+            'private' => 'public',
+            default => 'public',
+        };
+
+        $this->privacy = $next;
+    }
+
+    public function cyclePrivacyOnPost(Post $post)
+    {
+        Gate::authorize('update', $post);
+
+        $current = $post->privacy;
+
+        $next = match($current) {
+            PostPrivacy::PUBLIC => PostPrivacy::FRIENDS,
+            PostPrivacy::FRIENDS => PostPrivacy::PRIVATE,
+            PostPrivacy::PRIVATE => PostPrivacy::PUBLIC,
+        };
+
+        $post->update(['privacy' => $next]);
+    }
+
     public function removeImage($index)
     {
         $this->images = collect($this->images)
             ->forget($index)
             ->values()
             ->all();
+    }
+
+    public function deleteExistingImage($imageId)
+    {
+        $image = PostImage::findOrFail($imageId);
+        Gate::authorize('delete', $image->post);
+        Storage::disk('public')->delete($image->path);
+        $image->delete();
     }
 
     public function setPost(Post $post)
@@ -149,7 +214,17 @@ class PostForm extends Form
         $this->privacy = $post->privacy->value;
     }
 
-    #[Isolate]
+    public function destroy()
+    {
+        Gate::authorize('delete', $this->post);
+
+        foreach ($this->post->images as $image) {
+            Storage::disk('public')->delete($image->path);
+        }
+
+        $this->post->delete();
+    }
+
     public function update()
     {
         Gate::authorize('update', $this->post);
@@ -171,7 +246,6 @@ class PostForm extends Form
         $this->reset('images');
     }
 
-    #[Isolate]
     public function save()
     {
         Gate::authorize('create', Post::class);
@@ -179,7 +253,7 @@ class PostForm extends Form
         $this->validate();
 
         DB::transaction(function () {
-           $newPost = auth()->user()->posts()->create([
+            $newPost = auth()->user()->posts()->create([
                 'body' => $this->body,
                 'privacy' => $this->privacy,
             ]);
@@ -199,6 +273,125 @@ class PostForm extends Form
 
 
 ========================================
+FILE: GlobalSearch.php
+PATH: app/Livewire/GlobalSearch.php
+========================================
+<?php
+
+namespace App\Livewire;
+
+use App\Models\Post;
+use App\Models\User;
+use Illuminate\Support\Str;
+use Livewire\Attributes\Computed;
+use Livewire\Component;
+
+class GlobalSearch extends Component
+{
+    public string $query = '';
+
+    public function clear(): void
+    {
+        $this->reset('query');
+    }
+
+    #[Computed]
+    public function users()
+    {
+        if (Str::length($this->query) < 2) {
+            return collect();
+        }
+        return User::query()
+            ->where('name', 'like', '%' . $this->query . '%')
+            ->orWhere('bio', 'like', '%' . $this->query . '%')
+            ->take(10)
+            ->get();
+
+    }
+
+
+    #[Computed]
+    public function posts()
+    {
+        if (Str::length($this->query) < 2) {
+            return collect();
+        }
+        return Post::query()
+            ->where('body', 'like', '%' . $this->query . '%')
+            ->whereIn('privacy', ['public', 'friends'])
+            ->with('user')
+            ->take(10)
+            ->get();
+    }
+
+    public function render()
+    {
+        return view('livewire.global-search');
+
+    }
+}
+
+
+
+
+========================================
+FILE: Posts/CommentLike.php
+PATH: app/Livewire/Posts/CommentLike.php
+========================================
+<?php
+
+namespace App\Livewire\Posts;
+
+use App\Models\Comment;
+use Livewire\Attributes\Computed;
+use Livewire\Component;
+
+class CommentLike extends Component
+{
+    public Comment $comment;
+
+    public function mount(Comment $comment)
+    {
+        $this->comment = $comment->loadCount('likes');
+    }
+
+    #[Computed]
+    public function isLiked()
+    {
+        if (!auth()->check())
+            return false;
+
+        return auth()->user()->commentLikes()
+            ->where('comment_id', $this->comment->id)
+            ->exists();
+    }
+
+    public function toggleLike()
+    {
+        if (!auth()->check()) return $this->redirectRoute('login');
+
+        $like = auth()->user()->commentLikes()->where('comment_id', $this->comment->id);
+
+        if ($like->exists()) {
+            $like->delete();
+        } else {
+            auth()->user()->commentLikes()->create([
+                'comment_id' => $this->comment->id,
+            ]);
+        }
+
+        $this->comment->refresh()->loadCount('likes');
+        unset($this->isLiked);
+    }
+
+    public function render()
+    {
+        return view('livewire.posts.comment-like');
+    }
+}
+
+
+========================================
 FILE: Posts/Comments.php
 PATH: app/Livewire/Posts/Comments.php
 ========================================
@@ -207,39 +400,112 @@ PATH: app/Livewire/Posts/Comments.php
 namespace App\Livewire\Posts;
 
 use App\Models\Post;
+use App\Models\Comment;
+use Livewire\Attributes\Session;
+use Livewire\Attributes\Url;
 use Livewire\Component;
+use Livewire\Attributes\On;
+use Livewire\Attributes\Isolate;
 
+#[Isolate]
 class Comments extends Component
 {
-    public Post $post;
-    public $replyingTo = null;
-    public $newComment = '';
+    #[Url (as: 'thread')]
+    public ?int $postId = null;
+    public ?int $replyingTo = null;
+    public string $newComment = '';
 
-    public function mount(Post $post)
+    #[On('open-comment-modal')]
+    public function openModal($postId)
     {
-        $this->post = $post;
+        $this->postId = $postId;
+        $this->reset(['newComment', 'replyingTo']);
     }
+
+    public function postComment()
+    {
+        $this->validate(
+            ['newComment' => 'required|max:1255'],
+            ['newComment.required' => 'Type something before sending!']
+        );
+
+        auth()->user()->comments()->create([
+            'post_id' => $this->postId,
+            'parent_id' => $this->replyingTo,
+            'body' => trim($this->newComment),
+        ]);
+
+        $this->reset(['newComment', 'replyingTo']);
+    }
+
+    public function deleteComment($commentId)
+    {
+        $comment = Comment::findOrFail($commentId);
+
+        if ($comment->user_id === auth()->id()) {
+            $comment->delete();
+        }
+    }
+
     public function setReply($commentId)
     {
         $this->replyingTo = $commentId;
     }
 
-    public function postComment()
+    public function cancelReply()
     {
-        $this->validate(['newComment' => 'required|min:1']);
-        auth()->user()->comments()->create([
-            'post_id' => $this->post->id,
-            'parent_id' => $this->replyingTo,
-            'body' => $this->newComment,
-        ]);
+        $this->replyingTo = null;
+    }
 
-        $this->reset(['newComment', 'replyingTo']);
-        $this->dispatch('comment-added');
+    public function close()
+    {
+        $this->reset();
     }
 
     public function render()
     {
-        return view('livewire.posts.comments');
+        $post = null;
+        $comments = [];
+        $commentsCount = 0;
+        $replyingToUser = null;
+
+        if ($this->postId) {
+            $post = Post::withCount('comments')->find($this->postId);
+            $commentsCount = $post?->comments_count ?? 0;
+
+            $comments = Comment::query()
+                ->where('post_id', $this->postId)
+                ->whereNull('parent_id') // Get main comments
+                ->withCount('likes')
+                ->with([
+                    'user',
+                    // Level 1: Go inside the replies
+                    'replies' => function ($q) {
+                        $q->withCount('likes') // Count likes for the first replies
+                        ->with('user')
+                            ->with([
+                                // Level 2: Go inside the replies of the replies!
+                                'replies' => function ($q2) {
+                                    $q2->withCount('likes')->with('user');
+                                }
+                            ]);
+                    }
+                ])
+                ->latest()
+                ->cursorPaginate(50);
+
+            if ($this->replyingTo) {
+                $replyingComment = Comment::with('user')->find($this->replyingTo);
+                $replyingToUser = $replyingComment?->user;
+            }
+        }
+
+        return view('livewire.posts.comments', [
+            'comments' => $comments,
+            'post' => $post,
+            'commentsCount' => $commentsCount,
+            'replyingToUser' => $replyingToUser,
+        ]);
     }
 }
 
@@ -267,12 +533,17 @@ class Create extends Component
         $this->form->save();
         $this->dispatch('post-created');
         session()->flash('success_CreatedPost', 'Your post has been shared with the world!');
-        return $this->redirect('/feed', navigate: true);
+        return $this->redirectRoute('feed', navigate: true);
     }
 
     public function removeImage($index)
     {
         $this->form->removeImage($index);
+    }
+
+    public function cyclePrivacy()
+    {
+        $this->form->cyclePrivacy();
     }
 
     public function render()
@@ -292,18 +563,24 @@ namespace App\Livewire\Posts;
 
 use App\Livewire\Forms\Posts\PostForm;
 use App\Models\Post;
+use Livewire\Attributes\Url;
 use Livewire\Component;
+use Livewire\WithFileUploads;
 
 class Edit extends Component
 {
+    use WithFileUploads;
+
     public PostForm $form;
     public Post $post;
-    public string $previousurl;
+    #[Url(as: 'back')]
+    public string $previousurl = '';
 
 
     public function mount(Post $post)
     {
-        $this->form->setPost($post);
+        $this->post = $post->load('images');
+        $this->form->setPost($this->post);
         $this->previousurl = url()->previous();
     }
 
@@ -316,9 +593,132 @@ class Edit extends Component
         return $this->redirect($this->previousurl, navigate: true);
     }
 
+    public function cyclePrivacy()
+    {
+        $this->form->cyclePrivacy();
+    }
+
     public function render()
     {
         return view('livewire.posts.edit');
+    }
+}
+
+
+========================================
+FILE: Posts/Feed.php
+PATH: app/Livewire/Posts/Feed.php
+========================================
+<?php
+
+namespace App\Livewire\Posts;
+
+use App\Livewire\Forms\Posts\PostForm;
+use App\Models\Post;
+use Livewire\Attributes\On;
+use Livewire\Attributes\Url;
+use Livewire\Component;
+use Livewire\WithPagination;
+
+class Feed extends Component
+{
+    use WithPagination;
+
+    public PostForm $form;
+
+
+    #[On('post-created')]
+    #[On('post-updated')]
+    #[On('post-deleted')]
+    #[On('comment-added')]
+    public function refreshFeed()
+    {
+        // No code is needed inside here.
+        // The simple act of this function running
+        // forces Livewire to run the render() method again!
+    }
+
+    #[On('delete-post')]
+    public function handleDeletePost($postId)
+    {
+        $post = Post::findOrFail($postId);
+        $this->form->setPost($post);
+        $this->form->destroy();
+        $this->dispatch('post-deleted');
+    }
+
+    public function deletePost(Post $post)
+    {
+        $this->form->setPost($post);
+        $this->form->destroy();
+        $this->dispatch('post-deleted');
+    }
+
+    public function render()
+    {
+        $followingIds = auth()->user()->following()->pluck('user_id');
+
+        $posts = Post::query()->where(function ($query) use ($followingIds) {
+
+            $query->where(function ($q) {
+                $q->where('user_id', auth()->id())
+                    ->whereIn('privacy', ['public', 'friends']);
+            })
+                ->orWhere('privacy', 'public')
+                ->orWhere(function ($subQuery) use ($followingIds) {
+                    $subQuery->whereIn('user_id', $followingIds)
+                        ->whereIn('privacy', ['public', 'friends']);
+                });
+        })
+            ->with(['user', 'images'])
+            ->withCount('comments', 'likes')
+            ->latest()
+            ->cursorPaginate(50);
+
+        return view('livewire.posts.feed', ['posts' => $posts]);
+    }
+}
+
+
+========================================
+FILE: Posts/FollowingFeed.php
+PATH: app/Livewire/Posts/FollowingFeed.php
+========================================
+<?php
+
+namespace App\Livewire\Posts;
+
+use App\Models\Post;
+use Livewire\Attributes\Url;
+use Livewire\Component;
+use Livewire\WithPagination;
+
+class FollowingFeed extends Component
+{
+
+
+    use WithPagination;
+
+    public function render()
+    {
+        $followingIds = auth()->user()->following()->pluck('users.id');
+
+        $posts = collect();
+
+        if ($followingIds->isNotEmpty()) {
+            $posts = Post::query()
+                ->with(['user', 'images'])
+                ->withCount(['comments', 'likes'])
+                ->whereIn('user_id', $followingIds)
+                ->whereIn('privacy', ['public', 'friends'])
+                ->latest()
+                ->cursorPaginate(50);
+        }
+
+        return view('livewire.posts.following', [
+            'posts' => $posts,
+            'followsAnyone' => $followingIds->isNotEmpty(),
+        ]);
     }
 }
 
@@ -333,36 +733,41 @@ namespace App\Livewire\Posts;
 
 use App\Models\Post;
 use Livewire\Attributes\Computed;
+use Livewire\Attributes\Isolate;
 use Livewire\Component;
 
+#[Isolate]
 class Like extends Component
 {
     public Post $post;
 
-    public function mount(Post $post)
+    public function mount(Post $post): void
     {
-        $this->post = $post;
+        $this->post = $post->loadCount('likes');
     }
 
     #[Computed]
-    public function isLiked()
+    public function isLiked(): bool
     {
         if (!auth()->check()) {
             return false;
         }
+
         return auth()->user()->likes()
             ->where('post_id', $this->post->id)
             ->exists();
-
     }
 
-    public function toggleLike()
+    public function toggleLike(): void
     {
-        if (!auth()->user()) {
-            redirect('/login');
+        if (!auth()->check()) {
+            $this->redirect($this->loginUrl(), navigate: true);
+
+            return;
         }
 
         $like = auth()->user()->likes()->where('post_id', $this->post->id);
+
         if ($like->exists()) {
             $like->delete();
         } else {
@@ -370,8 +775,15 @@ class Like extends Component
                 'post_id' => $this->post->id,
             ]);
         }
+
+        $this->post->loadCount('likes');
+        unset($this->isLiked);
     }
 
+    public function loginUrl(): string
+    {
+        return route('login');
+    }
 
     public function render()
     {
@@ -391,10 +803,13 @@ namespace App\Livewire\Users;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Livewire\Attributes\Isolate;
+use Livewire\Attributes\Layout;
 use Livewire\Attributes\Validate;
 use Livewire\Component;
 use Livewire\WithFileUploads;
 
+#[Layout('layouts::wide')]
+#[Isolate]
 class Edit extends Component
 {
     use WithFileUploads;
@@ -412,7 +827,6 @@ class Edit extends Component
         $this->newBio = auth()->user()->bio;
     }
 
-    #[Isolate]
     public function update()
     {
         $user = auth()->user();
@@ -520,20 +934,43 @@ PATH: app/Livewire/Users/Show.php
 namespace App\Livewire\Users;
 
 use App\Models\User;
+use App\Livewire\Forms\Posts\PostForm;
+use App\Models\Post;
+use Livewire\Attributes\Layout;
+use Livewire\Attributes\Url;
 use Livewire\Component;
+use Livewire\WithPagination;
 
+#[Layout('layouts::wide')]
 class Show extends Component
 {
     public User $user;
 
+    public PostForm $form;
+
+    use withPagination;
+
+    #[Url(as: 'view')]
+    public string $tab = 'posts';
+
     public function mount(User $user)
     {
-        $this->user = $user;
+        $this->user = $user->loadCount(['posts', 'followers', 'following']);
+
+    }
+
+    #[\Livewire\Attributes\On('delete-post')]
+    public function handleDeletePost($postId)
+    {
+        $post = Post::findOrFail($postId);
+        $this->form->setPost($post);
+        $this->form->destroy();
+        $this->dispatch('post-deleted');
     }
 
     public function render()
     {
-        $query = $this->user->posts()->with(['user', 'images'])->latest();
+        $query = $this->user->posts()->with(['user', 'images'])->withCount(['comments', 'likes'])->latest();
 
         $allowedPrivacy = ['public'];
         if (auth()->check()) {
@@ -547,12 +984,15 @@ class Show extends Component
             }
         }
 
-        $posts = $query->whereIn('privacy', $allowedPrivacy)->get();
+        $followersList = $this->user->followers()->latest()->simplePaginate(50, pageName: 'followers-page');
+        $followingList = $this->user->following()->latest()->simplePaginate(50, pageName: 'followings-page');
+
+        $posts = $query->whereIn('privacy', $allowedPrivacy)->cursorPaginate(50);
 
         return view('livewire.users.show', [
             'posts' => $posts,
-            'followersList' => $this->user->followers()->latest()->get(),
-            'followingList' => $this->user->following()->latest()->get(),
+            'followingList' => $followingList,
+            'followersList' => $followersList,
         ]);
     }
 }
@@ -566,35 +1006,42 @@ PATH: app/Models/Comment.php
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Comment extends Model
 {
     protected $fillable = ['post_id', 'parent_id', 'body', 'user_id'];
 
+    use HasFactory;
+    public function commentUrl()
+    {
+        return route('profile.show', $this->user->name) . '#comment-' . $this->id;
+    }
 
-    public function user()
+    public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }
 
-    public function post()
+    public function post(): BelongsTo
     {
         return $this->belongsTo(Post::class);
     }
-    public function parent()
+
+    public function parent(): BelongsTo
     {
-        // Logic: Find the ONE row where the "id" matches MY "parent_id"
         return $this->belongsTo(Comment::class, 'parent_id');
     }
 
-    public function replies()
+    public function replies(): HasMany
     {
-        // Logic: Find all rows where the "parent_id" matches MY "id"
         return $this->hasMany(Comment::class, 'parent_id');
     }
 
-    public function likes()
+    public function likes(): HasMany
     {
         return $this->hasMany(CommentLike::class);
     }
@@ -610,17 +1057,18 @@ PATH: app/Models/CommentLike.php
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class CommentLike extends Model
 {
     protected $fillable = ['user_id','comment_id'];
 
-    public function user()
+    public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }
 
-    public function comment()
+    public function comment(): BelongsTo
     {
         return $this->belongsTo(Comment::class);
     }
@@ -636,12 +1084,25 @@ PATH: app/Models/Like.php
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Like extends Model
 {
-protected $fillable = ['user_id', 'post_id'];
+    protected $fillable = ['user_id', 'post_id'];
 
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function post(): BelongsTo
+    {
+        return $this->belongsTo(Post::class);
+    }
 }
+
+
+
 
 
 ========================================
@@ -653,12 +1114,17 @@ PATH: app/Models/Post.php
 namespace App\Models;
 
 use App\Enums\PostPrivacy;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Notifications\Notifiable;
 
 class Post extends Model
 {
     protected $fillable = ['body', 'privacy', 'user_id',];
+
+    use HasFactory;
 
     protected function casts(): array
     {
@@ -667,25 +1133,31 @@ class Post extends Model
         ];
     }
 
+    public function postUrl(): string
+    {
+        return route('profile.show', $this->user->name) . '#post-' . $this->id;
+    }
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }
 
-    public function comments()
+    public function comments(): HasMany
     {
         return $this->hasMany(Comment::class);
     }
 
-    public function likes()
+    public function likes(): HasMany
     {
         return $this->hasMany(Like::class);
     }
 
-    public function images()
+    public function images(): HasMany
     {
         return $this->hasMany(PostImage::class);
     }
+
 }
 
 
@@ -698,13 +1170,26 @@ PATH: app/Models/PostImage.php
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class PostImage extends Model
 {
     protected $fillable = ['post_id', 'path'];
-    public function post()
+
+    public function post(): BelongsTo
     {
         return $this->belongsTo(Post::class);
+    }
+
+    public function url(): string
+    {
+        if (Str::startsWith($this->path, ['http://', 'https://', '/'])) {
+            return $this->path;
+        }
+
+        return Storage::disk('public')->url($this->path);
     }
 }
 
@@ -722,9 +1207,12 @@ use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 #[Fillable(['name', 'email', 'password','avatar', 'banner', 'bio'])]
 #[Hidden(['password', 'remember_token'])]
@@ -751,31 +1239,53 @@ class User extends Authenticatable
      return $this->hasMany(Post::class);
     }
 
-    public function comments()
+    public function comments(): HasMany
     {
         return $this->hasMany(Comment::class);
     }
 
-    public function commentLikes()
+    public function commentLikes(): HasMany
     {
         return $this->hasMany(CommentLike::class);
     }
 
-    public function likes()
+    public function likes(): HasMany
     {
         return $this->hasMany(Like::class);
     }
 
-    public function following()
+    public function following(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'follows', 'follower_id', 'user_id')->withTimestamps();
     }
-    public function followers()
+
+    public function followers(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'follows', 'user_id', 'follower_id')->withTimestamps();
     }
 
+    public function avatarUrl(): string
+    {
+        if ($this->avatar) {
+            return $this->storageUrl($this->avatar);
+        }
 
+        return 'https://ui-avatars.com/api/?name='.urlencode($this->name).'&background=6366f1&color=fff';
+    }
+
+    public function bannerUrl(): ?string
+    {
+        return $this->banner ? $this->storageUrl($this->banner) : null;
+    }
+
+    protected function storageUrl(string $path): string
+    {
+        if (Str::startsWith($path, ['http://', 'https://', '/'])) {
+            return $path;
+        }
+
+        return Storage::disk('public')->url($path);
+    }
 }
 
 
@@ -893,7 +1403,7 @@ PATH: resources/views/livewire/auth/login.blade.php
              x-transition:enter-end="opacity-100">
             <p class="text-zinc-600 text-[10px] font-bold uppercase tracking-widest">
                 New to the platform?
-                <a href="/register" class="text-indigo-400 hover:text-white transition-colors ml-1">Create Account</a>
+                <a href="{{ route('register') }}" wire:navigate class="text-indigo-400 hover:text-white transition-colors ml-1">Create Account</a>
             </p>
         </div>
     </div>
@@ -989,7 +1499,7 @@ PATH: resources/views/livewire/auth/register.blade.php
         <div class="mt-8 text-center">
             <p class="text-zinc-600 text-[10px] font-bold uppercase tracking-widest">
                 Already part of the network?
-                <a href="/login" class="text-indigo-400 hover:text-white transition-colors ml-1">Sign In</a>
+                <a href="{{ route('login') }}" wire:navigate class="text-indigo-400 hover:text-white transition-colors ml-1">Sign In</a>
             </p>
         </div>
     </div>
@@ -997,65 +1507,217 @@ PATH: resources/views/livewire/auth/register.blade.php
 
 
 ========================================
-FILE: posts/comments.blade.php
-PATH: resources/views/livewire/posts/comments.blade.php
+FILE: global-search.blade.php
+PATH: resources/views/livewire/global-search.blade.php
 ========================================
-<div x-data="{ open: false }"
-     @open-comment-modal.window="if($event.detail.postId == {{ $post->id }}) open = true"
-     class="relative">
+<div class="relative" x-data="{ focused: false, tab: 'users', query: '' }"
+     x-init="$watch('$wire.query', value => { query = value; if(value.length >= 2) focused = true; else focused = false; })"
+     @click.away="focused = false">
+    <div class="relative">
+        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+            <svg class="w-4 h-4 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+            </svg>
+        </div>
+        <input type="text"
+               placeholder="Search users or posts..."
+               wire:model.live.debounce.300ms="query"
+               @focus="focused = true"
+               class="w-48 sm:w-56 bg-white/[0.03] border border-white/5 rounded-xl pl-9 pr-8 py-2 text-xs text-white placeholder-zinc-600 outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/30 transition-all"
+        >
+        <button x-show="query.length >= 2" wire:click="clear" @click="focused = false; $wire.clear()"
+                class="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-600 hover:text-white transition-colors">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+        </button>
+    </div>
 
-    <div x-show="open" x-cloak x-teleport="body">
-        <!-- Backdrop -->
-        <div class="fixed inset-0 bg-zinc-950/80 backdrop-blur-md z-[100] flex items-center justify-center p-4">
-            <!-- Modal Card -->
-            <div @click.away="open = false"
-                 class="bg-zinc-900 border border-white/10 w-full max-w-xl rounded-[2.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300">
+    <div x-show="focused && query.length >= 2" x-cloak
+         class="absolute top-full right-0 mt-2 w-80 sm:w-96 bg-zinc-900/95 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50"
+         x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 -translate-y-2" x-transition:enter-end="opacity-100 translate-y-0">
 
-                <!-- Header -->
-                <div class="px-8 py-6 border-b border-white/5 flex justify-between items-center bg-zinc-900/50">
-                    <h2 class="text-lg font-black tracking-tighter text-white italic">Byte<span class="text-indigo-400">Thread</span></h2>
-                    <button @click="open = false" class="text-zinc-500 hover:text-white transition-colors text-2xl">&times;</button>
-                </div>
+        <!-- Tabs -->
+        <div class="flex border-b border-white/5">
+            <button @click="tab = 'users'"
+                    :class="tab === 'users' ? 'text-white border-indigo-500' : 'text-zinc-500 border-transparent hover:text-zinc-300'"
+                    class="flex-1 px-4 py-3 text-[10px] font-black uppercase tracking-[0.2em] border-b-2 transition-all">
+                Users
+            </button>
+            <button @click="tab = 'posts'"
+                    :class="tab === 'posts' ? 'text-white border-indigo-500' : 'text-zinc-500 border-transparent hover:text-zinc-300'"
+                    class="flex-1 px-4 py-3 text-[10px] font-black uppercase tracking-[0.2em] border-b-2 transition-all">
+                Posts
+            </button>
+        </div>
 
-                <!-- Comment Feed -->
-                <div class="p-8 max-h-[50vh] overflow-y-auto custom-scrollbar space-y-6">
-                    @forelse($post->comments->where('parent_id', null) as $comment)
-                        <div class="flex space-x-4">
-                            <img src="https://ui-avatars.com/api/?name={{ $comment->user->name }}&background=111&color=fff" class="w-8 h-8 rounded-full border border-white/10">
-                            <div class="flex flex-col flex-1">
-                                <div class="bg-zinc-800/40 p-4 rounded-2xl rounded-tl-none border border-white/5 shadow-inner">
-                                    <h4 class="text-xs font-bold text-white mb-1">{{ $comment->user->name }}</h4>
-                                    <p class="text-sm text-zinc-300 leading-relaxed">{{ $comment->body }}</p>
-                                </div>
-                                <button wire:click="setReply({{ $comment->id }})" class="text-[9px] font-black uppercase tracking-widest text-indigo-400 mt-2 ml-1 hover:text-white">Reply Byte</button>
+        <div class="max-h-96 overflow-y-auto custom-scrollbar">
+            <!-- Users Tab -->
+            <div x-show="tab === 'users'" x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100">
+                @if($this->users->isNotEmpty())
+                    @foreach($this->users as $user)
+                        <a href="{{ route('profile.show', $user->name) }}" wire:navigate
+                           class="flex items-center gap-3 px-4 py-3 hover:bg-white/5 transition-colors">
+                            <img src="{{ $user->avatarUrl() }}" alt="" class="w-9 h-9 rounded-xl object-cover border border-white/10 shrink-0">
+                            <div class="min-w-0">
+                                <p class="text-sm font-semibold text-white truncate">{{ $user->name }}</p>
+                                @if($user->bio)
+                                    <p class="text-[10px] text-zinc-500 truncate">{{ Str::limit($user->bio, 40) }}</p>
+                                @endif
                             </div>
-                        </div>
-                    @empty
-                        <p class="text-center text-zinc-600 text-[10px] font-bold uppercase tracking-widest py-10 italic">Be the first byte in this thread.</p>
-                    @endforelse
-                </div>
-
-                <!-- Input Area -->
-                <div class="p-6 bg-zinc-950/50 border-t border-white/5">
-                    @if($replyingTo)
-                        <div class="flex items-center justify-between mb-2 px-2">
-                            <span class="text-[9px] text-indigo-400 font-bold uppercase tracking-widest italic">Replying to Thread...</span>
-                            <button wire:click="$set('replyingTo', null)" class="text-zinc-500 hover:text-white">✕</button>
-                        </div>
-                    @endif
-                    <div class="relative group">
-                        <textarea wire:model="newComment"
-                                  class="w-full bg-zinc-800/50 border-none rounded-2xl p-4 pr-16 text-sm text-zinc-200 placeholder-zinc-700 resize-none focus:ring-1 focus:ring-indigo-500/50 shadow-inner"
-                                  placeholder="Write a comment..."></textarea>
-                        <button wire:click="postComment"
-                                class="absolute right-3 bottom-3 p-2.5 bg-white text-zinc-950 rounded-xl hover:scale-110 active:scale-95 transition-all shadow-xl">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                        </button>
+                        </a>
+                    @endforeach
+                @else
+                    <div class="px-4 py-12 text-center">
+                        <svg class="w-8 h-8 text-zinc-700 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                        </svg>
+                        <p class="text-zinc-600 text-xs font-medium">No users found</p>
                     </div>
-                </div>
+                @endif
+            </div>
+
+            <!-- Posts Tab -->
+            <div x-show="tab === 'posts'" x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100">
+                @if($this->posts->isNotEmpty())
+                    @foreach($this->posts as $post)
+                        <a href="{{ route('profile.show', $post->user->name) }}" wire:navigate
+                           class="flex items-start gap-3 px-4 py-3 hover:bg-white/5 transition-colors">
+                            <img src="{{ $post->user->avatarUrl() }}" alt="" class="w-7 h-7 rounded-lg object-cover border border-white/10 shrink-0 mt-0.5">
+                            <div class="min-w-0">
+                                <p class="text-[10px] font-black text-zinc-500 uppercase tracking-wider">{{ $post->user->name }}</p>
+                                <p class="text-xs text-zinc-400 truncate mt-0.5">{{ Str::limit($post->body, 60) }}</p>
+                            </div>
+                        </a>
+                    @endforeach
+                @else
+                    <div class="px-4 py-12 text-center">
+                        <svg class="w-8 h-8 text-zinc-700 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z"></path>
+                        </svg>
+                        <p class="text-zinc-600 text-xs font-medium">No posts found</p>
+                    </div>
+                @endif
             </div>
         </div>
     </div>
+</div>
+
+
+========================================
+FILE: posts/comment-like.blade.php
+PATH: resources/views/livewire/posts/comment-like.blade.php
+========================================
+<div>
+    <button type="button" wire:click.stop="toggleLike"
+            class="group flex items-center space-x-1.5 px-2 py-1 rounded-lg transition-all duration-200 active:scale-95 {{ $this->isLiked ? 'text-rose-400' : 'text-zinc-600 hover:text-zinc-400' }}">
+
+        <svg class="w-3 h-3 transition-all duration-300 {{ $this->isLiked ? 'fill-rose-400 drop-shadow-[0_0_6px_rgba(251,113,133,0.4)]' : 'stroke-current' }}"
+             fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"></path>
+        </svg>
+
+        <span class="text-[9px] font-bold uppercase tracking-wider {{ $this->isLiked ? 'text-rose-400' : 'text-zinc-600 group-hover:text-zinc-400' }}">
+            {{ $this->comment->likes_count ?? 0 }}
+        </span>
+    </button>
+</div>
+
+
+========================================
+FILE: posts/comments.blade.php
+PATH: resources/views/livewire/posts/comments.blade.php
+========================================
+<div>
+    @if($post)
+        <div class="fixed inset-0 z-[250] flex items-center justify-center p-4"
+             wire:keydown.escape.window="close">
+
+            <button type="button" wire:click="close" class="absolute inset-0 bg-zinc-950/90 backdrop-blur-xl cursor-default" aria-label="Close thread"></button>
+
+            <div class="relative w-full max-w-2xl bg-zinc-900/95 border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[85vh] z-10"
+                 wire:click.stop>
+
+                <div class="p-6 sm:p-8 border-b border-white/5 flex items-center justify-between shrink-0">
+                    <div>
+                        <h2 class="text-xl font-black text-white italic uppercase tracking-tighter">Byte<span class="text-indigo-500">Thread</span></h2>
+                        <p class="text-[9px] font-bold text-zinc-500 uppercase tracking-widest mt-1">{{ $commentsCount }} in this thread</p>
+                    </div>
+                    <button type="button" wire:click="close" class="w-10 h-10 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full text-zinc-400 hover:text-white transition-all" aria-label="Close">✕</button>
+                </div>
+
+                <div class="flex-1 overflow-y-auto p-6 sm:p-8 space-y-6 custom-scrollbar min-h-0">
+                    @forelse($comments as $comment)
+                        <div wire:key="comment-{{ $comment->id }}" class="flex gap-4">
+                            <a href="{{ route('profile.show', $comment->user->name) }}" wire:navigate class="shrink-0">
+                                <img src="{{ $comment->user->avatarUrl() }}" alt="" class="w-10 h-10 rounded-xl object-cover border border-white/10">
+                            </a>
+                            <div class="flex-1 min-w-0">
+                                <div class="bg-zinc-950/60 border border-white/5 p-4 rounded-3xl rounded-tl-none">
+                                    <div class="flex items-start justify-between gap-2 mb-2">
+                                        <a href="{{ route('profile.show', $comment->user->name) }}" wire:navigate
+                                           class="text-xs font-black text-white uppercase tracking-tight hover:text-indigo-400 transition-colors truncate">
+                                            {{ $comment->user->name }}
+                                        </a>
+                                        <div class="flex items-center gap-2 shrink-0">
+                                            <span class="text-[9px] font-bold text-zinc-600 uppercase">{{ $comment->created_at->diffForHumans() }}</span>
+                                            @if(auth()->id() === $comment->user_id)
+                                                <button type="button" wire:click="deleteComment({{ $comment->id }})"
+                                                        wire:confirm="Delete this comment?"
+                                                        class="text-[9px] font-bold text-red-400/80 hover:text-red-400 uppercase">Delete</button>
+                                            @endif
+                                        </div>
+                                    </div>
+                                    <p class="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">{{ $comment->body }}</p>
+                                </div>
+
+                                <div class="mt-2 ml-1 flex items-center gap-3">
+                                    <livewire:posts.comment-like :comment="$comment" :wire:key="'clike-'.$comment->id" />
+                                    <button type="button" wire:click="setReply({{ $comment->id }})"
+                                            class="text-[9px] font-black text-indigo-400 uppercase tracking-widest hover:text-white transition-colors">
+                                        Reply
+                                    </button>
+                                </div>
+
+                                @foreach($comment->replies as $reply)
+                                    @include('livewire.posts.partials.comment-reply', ['reply' => $reply, 'depth' => 1])
+                                @endforeach
+                            </div>
+                        </div>
+                    @empty
+                        <div class="py-16 text-center">
+                            <p class="text-zinc-400 text-sm">No comments yet. Say something first.</p>
+                        </div>
+                    @endforelse
+                </div>
+
+                <div class="p-5 sm:p-6 bg-zinc-950/80 border-t border-white/5 shrink-0">
+                    @if($replyingTo)
+                        <div class="flex items-center justify-between mb-3 px-1">
+                            <span class="text-[9px] font-black text-indigo-400 uppercase tracking-widest">
+                                Replying to {{ $replyingToUser?->name ?? 'comment' }}
+                            </span>
+                            <button type="button" wire:click="cancelReply" class="text-[9px] font-bold text-zinc-600 hover:text-white uppercase tracking-widest">Cancel</button>
+                        </div>
+                    @endif
+
+                    <form wire:submit.prevent="postComment" class="relative">
+                        <textarea wire:model="newComment"
+                                  rows="2"
+                                  class="w-full bg-zinc-900 border border-white/5 rounded-3xl p-4 pr-14 text-sm text-white placeholder-zinc-600 outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
+                                  placeholder="Share your thoughts…"></textarea>
+                        @error('newComment')
+                            <p class="text-rose-400/80 text-[10px] font-bold uppercase tracking-widest mt-2 ml-1 animate-pulse">{{ $message }}</p>
+                        @enderror
+                        <button type="submit" wire:loading.attr="disabled" wire:target="postComment"
+                                class="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-white text-zinc-950 rounded-xl hover:bg-indigo-500 hover:text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    @endif
 </div>
 
 
@@ -1103,7 +1765,7 @@ PATH: resources/views/livewire/posts/create.blade.php
             <!-- Header: Drafting Post & Avatar -->
             <div class="flex items-center space-x-4">
                 <div class="w-12 h-12 rounded-full overflow-hidden border border-white/10 shadow-lg">
-                    <img src="https://ui-avatars.com/api/?name={{ auth()->user()->name }}&background=111&color=fff" class="w-full h-full object-cover">
+                    <img src="{{ auth()->user()->avatarUrl() }}" alt="" class="w-full h-full object-cover">
                 </div>
                 <div class="flex flex-col">
                     <h3 class="text-gray-200 font-semibold text-base leading-none tracking-tight">{{ auth()->user()->name }}</h3>
@@ -1182,7 +1844,14 @@ PATH: resources/views/livewire/posts/create.blade.php
                 </div>
 
                 <div class="flex items-center space-x-6">
-                    <button type="button" class="text-xs font-bold uppercase tracking-widest text-gray-600 hover:text-white transition-colors">Cancel</button>
+                    <button type="button" wire:click="cyclePrivacy"
+                            class="flex items-center space-x-2 px-4 py-2.5 bg-white/[0.03] border border-white/5 rounded-full text-[10px] font-black uppercase tracking-[0.15em] text-zinc-500 hover:text-white hover:border-white/20 transition-all">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                        </svg>
+                        <span>{{ $form->privacy === 'public' ? 'Public' : ($form->privacy === 'friends' ? 'Friends' : 'Only Me') }}</span>
+                    </button>
+                    <a href="{{ route('feed') }}" wire:navigate class="text-xs font-bold uppercase tracking-widest text-gray-600 hover:text-white transition-colors">Cancel</a>
                     <button type="submit" wire:loading.attr="disabled" class="px-10 py-3 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-full text-[10px] font-black tracking-[0.2em] text-white uppercase shadow-[0_0_20px_rgba(99,102,241,0.3)] hover:scale-105 active:scale-95 transition-all">
                         <span wire:loading.remove>Publish Post</span>
                         <span wire:loading>Publishing...</span>
@@ -1207,27 +1876,116 @@ PATH: resources/views/livewire/posts/create.blade.php
 FILE: posts/edit.blade.php
 PATH: resources/views/livewire/posts/edit.blade.php
 ========================================
-<div x-data="{ open: false }"
-     @open-edit-modal.window="if($event.detail.postId == {{ $post->id }}) open = true"
-     class="relative">
+<div class="w-full max-w-2xl mx-auto">
+    <a href="{{ url()->previous() !== url()->current() ? url()->previous() : route('feed') }}" wire:navigate
+       class="text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-white transition-colors">
+        ← Back
+    </a>
 
-    <div x-show="open" x-cloak x-teleport="body">
-        <div class="fixed inset-0 bg-zinc-950/90 backdrop-blur-md z-[110] flex items-center justify-center p-4">
-            <div @click.away="open = false"
-                 class="bg-zinc-900 border border-white/10 w-full max-w-xl rounded-[3rem] p-10 shadow-2xl animate-in zoom-in-95 duration-500">
+    <h1 class="mt-4 text-3xl font-black text-white italic uppercase tracking-tighter mb-8">
+        Refine <span class="text-indigo-500">Byte</span>
+    </h1>
 
-                <h2 class="text-xl font-black tracking-tighter text-white italic mb-10">Refine <span class="text-indigo-400">Byte</span></h2>
-
-                <textarea wire:model="form.body"
-                          class="w-full bg-zinc-800/30 border-none rounded-3xl p-6 text-xl text-zinc-200 placeholder-zinc-700 resize-none min-h-[200px] focus:ring-1 focus:ring-indigo-500/50 shadow-inner mb-6"></textarea>
-
-                <div class="flex justify-end space-x-6">
-                    <button @click="open = false" class="text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-white">Cancel</button>
-                    <button wire:click="update" class="px-10 py-4 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all">Save Changes</button>
-                </div>
-            </div>
+    @if (session()->has('success_EditedPost'))
+        <div class="mb-6 bg-indigo-500/10 border border-indigo-500/30 text-indigo-200 text-sm font-semibold px-5 py-4 rounded-2xl">
+            {{ session('success_EditedPost') }}
         </div>
-    </div>
+    @endif
+
+    <form wire:submit.prevent="update" class="space-y-6 bg-zinc-900/40 border border-white/10 rounded-[2.5rem] p-8">
+        <div>
+            <label class="text-[9px] font-black text-zinc-500 uppercase tracking-[0.3em] mb-3 block">Body</label>
+            <textarea wire:model="form.body"
+                      class="w-full bg-zinc-950 border border-white/5 rounded-3xl p-5 text-lg text-zinc-200 placeholder-zinc-700 resize-none min-h-[180px] focus:ring-1 focus:ring-indigo-500/50 outline-none"
+                      placeholder="What's on your mind?"></textarea>
+            @error('form.body') <p class="text-red-400 text-xs mt-2">{{ $message }}</p> @enderror
+        </div>
+
+        <div>
+            <label class="text-[9px] font-black text-zinc-500 uppercase tracking-[0.3em] mb-3 block">Privacy</label>
+            <button type="button" wire:click="cyclePrivacy"
+                    class="flex items-center space-x-2 px-5 py-3 bg-zinc-950 border border-white/5 rounded-2xl text-sm text-white hover:border-white/20 transition-all">
+                <svg class="w-4 h-4 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                </svg>
+                <span>{{ $form->privacy === 'public' ? 'Public' : ($form->privacy === 'friends' ? 'Friends Only' : 'Only Me') }}</span>
+            </button>
+        </div>
+
+        <div>
+            <label class="text-[9px] font-black text-zinc-500 uppercase tracking-[0.3em] mb-3 block">Add images</label>
+            <input type="file" wire:model="form.images" multiple accept="image/*"
+                   class="block w-full text-sm text-zinc-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-white/10 file:text-white file:font-bold file:text-[10px] file:uppercase">
+            @error('form.images.*') <p class="text-red-400 text-xs mt-2">{{ $message }}</p> @enderror
+        </div>
+
+        @if($post->images->isNotEmpty())
+            <div class="grid grid-cols-3 gap-2">
+                @foreach($post->images as $image)
+                    <img src="{{ $image->url() }}" alt="" class="rounded-xl aspect-square object-cover border border-white/10">
+                @endforeach
+            </div>
+        @endif
+
+        <div class="flex justify-end gap-4 pt-2">
+            <a href="{{ route('feed') }}" wire:navigate class="text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-white py-3">Cancel</a>
+            <button type="submit"
+                    class="px-10 py-3 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest hover:scale-105 active:scale-95 transition-all">
+                <span wire:loading.remove wire:target="update">Save Changes</span>
+                <span wire:loading wire:target="update">Saving…</span>
+            </button>
+        </div>
+    </form>
+</div>
+
+
+========================================
+FILE: posts/feed.blade.php
+PATH: resources/views/livewire/posts/feed.blade.php
+========================================
+<div class="w-full space-y-6">
+    <header class="mb-2">
+        <h1 class="text-3xl font-black text-white italic uppercase tracking-tighter">Your <span class="text-indigo-500">Feed</span></h1>
+        <p class="text-sm text-zinc-500 mt-1">Public posts from everyone</p>
+    </header>
+
+    @forelse($posts as $post)
+        <x-post-card :post="$post" />
+    @empty
+        <div class="py-16 text-center bg-zinc-900/40 border border-white/10 rounded-[2.5rem] px-6">
+            <p class="text-zinc-300 text-base">Nothing here yet.</p>
+            <p class="text-zinc-500 text-sm mt-2">When people start posting, you'll see their stuff show up here.</p>
+            <a href="{{ route('post.create') }}" wire:navigate class="mt-5 inline-block text-indigo-400 text-sm font-semibold hover:text-white transition-colors">
+                Or share something yourself →
+            </a>
+        </div>
+    @endforelse
+</div>
+
+
+========================================
+FILE: posts/following.blade.php
+PATH: resources/views/livewire/posts/following.blade.php
+========================================
+<div class="w-full space-y-6">
+    <header class="mb-2">
+        <h1 class="text-3xl font-black text-white italic uppercase tracking-tighter">People you <span class="text-indigo-500">follow</span></h1>
+        <p class="text-sm text-zinc-500 mt-1">Posts from accounts you follow</p>
+    </header>
+
+    @forelse($posts as $post)
+        <x-post-card :post="$post" />
+    @empty
+        <div class="py-16 text-center bg-zinc-900/40 border border-white/10 rounded-[2.5rem] px-6">
+            @if(! $followsAnyone)
+                <p class="text-zinc-300 text-base">You're not following anyone yet.</p>
+                <p class="text-zinc-500 text-sm mt-2">Browse profiles and follow people whose posts you want to see here.</p>
+            @else
+                <p class="text-zinc-300 text-base">Nothing new from people you follow.</p>
+                <p class="text-zinc-500 text-sm mt-2">When they post, it'll show up on this page.</p>
+            @endif
+        </div>
+    @endforelse
 </div>
 
 
@@ -1235,33 +1993,92 @@ PATH: resources/views/livewire/posts/edit.blade.php
 FILE: posts/like.blade.php
 PATH: resources/views/livewire/posts/like.blade.php
 ========================================
-<div x-data="{ liked: @entangle('isLiked') }" class="flex items-center space-x-2">
-    <button
-        wire:click="toggleLike"
-        @click="liked = !liked"
-        class="group relative flex items-center justify-center transition-all duration-500 active:scale-75"
-    >
-        <!-- The Electric Logo Icon -->
-        <div :class="liked ? 'bg-indigo-500 shadow-[0_0_20px_rgba(99,102,241,0.8)] border-indigo-400 scale-110' : 'bg-zinc-800 border-white/5'"
-             class="w-8 h-8 rounded-lg border flex items-center justify-center transition-all duration-500">
+{{--<div x-data="{ liked: @entangle('isLiked') }" class="flex items-center space-x-2">--}}
+{{--    <button--}}
+{{--        wire:click="toggleLike"--}}
+{{--        @click="liked = !liked"--}}
+{{--        class="group relative flex items-center justify-center transition-all duration-500 active:scale-75"--}}
+{{--    >--}}
+{{--        <!-- The Electric Logo Icon -->--}}
+{{--        <div :class="liked ? 'bg-indigo-500 shadow-[0_0_20px_rgba(99,102,241,0.8)] border-indigo-400 scale-110' : 'bg-zinc-800 border-white/5'"--}}
+{{--             class="w-8 h-8 rounded-lg border flex items-center justify-center transition-all duration-500">--}}
 
-            <svg :class="liked ? 'text-white fill-current' : 'text-zinc-500'"
-                 class="w-5 h-5 transition-colors duration-500"
-                 fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
-            </svg>
+{{--            <svg :class="liked ? 'text-white fill-current' : 'text-zinc-500'"--}}
+{{--                 class="w-5 h-5 transition-colors duration-500"--}}
+{{--                 fill="none" stroke="currentColor" viewBox="0 0 24 24">--}}
+{{--                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path>--}}
+{{--            </svg>--}}
+{{--        </div>--}}
+
+{{--        <!-- Particles Effect (Alpine) -->--}}
+{{--        <template x-if="liked">--}}
+{{--            <div class="absolute inset-0 pointer-events-none">--}}
+{{--                <div class="absolute top-0 left-1/2 -translate-x-1/2 w-1 h-4 bg-indigo-400 rounded-full animate-ping"></div>--}}
+{{--            </div>--}}
+{{--        </template>--}}
+{{--    </button>--}}
+{{--    <span :class="liked ? 'text-indigo-400' : 'text-zinc-500'" class="text-[10px] font-black uppercase tracking-widest transition-colors duration-500">--}}
+{{--        {{ $post->likes()->count() }} Bytes--}}
+{{--    </span>--}}
+{{--</div>--}}
+<div>
+    <button type="button" wire:click.stop="toggleLike"
+            class="group flex items-center space-x-3 px-5 py-3 rounded-2xl transition-all duration-300 active:scale-95 border {{ $this->isLiked ? 'bg-indigo-500/10 border-indigo-500/30' : 'bg-zinc-800/20 border-white/5 hover:bg-zinc-800/40' }}">
+
+        <svg class="w-4 h-4 transition-all duration-500 {{ $this->isLiked ? 'fill-indigo-500 text-indigo-500 drop-shadow-[0_0_10px_rgba(99,102,241,0.5)]' : 'text-zinc-500 group-hover:text-white' }}"
+             fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+        </svg>
+
+        <span class="text-[9px] font-black uppercase tracking-[0.2em] {{ $this->isLiked ? 'text-white' : 'text-zinc-500 group-hover:text-white' }}">
+            {{ $post->likes_count }} <span class="hidden sm:inline ml-1">Bytes</span>
+        </span>
+    </button>
+</div>
+
+
+
+========================================
+FILE: posts/partials/comment-reply.blade.php
+PATH: resources/views/livewire/posts/partials/comment-reply.blade.php
+========================================
+@php
+    $padding = $depth > 1 ? 'pl-8' : 'pl-4';
+    $avatarSize = $depth > 1 ? 'w-7 h-7 rounded-lg' : 'w-8 h-8 rounded-lg';
+@endphp
+<div wire:key="reply-{{ $reply->id }}" class="mt-4 flex gap-3 border-l-2 border-indigo-500/20 {{ $padding }}">
+    <a href="{{ route('profile.show', $reply->user->name) }}" wire:navigate class="shrink-0">
+        <img src="{{ $reply->user->avatarUrl() }}" alt="" class="{{ $avatarSize }} object-cover border border-white/10">
+    </a>
+    <div class="flex-1 min-w-0">
+        <div class="bg-indigo-500/5 p-3 rounded-2xl border border-indigo-500/10">
+            <div class="flex items-start justify-between gap-2 mb-1">
+                <a href="{{ route('profile.show', $reply->user->name) }}" wire:navigate
+                   class="text-[10px] font-black text-white uppercase hover:text-indigo-400 transition-colors">{{ $reply->user->name }}</a>
+                <div class="flex items-center gap-2 shrink-0">
+                    <span class="text-[9px] font-bold text-zinc-600 uppercase">{{ $reply->created_at->diffForHumans() }}</span>
+                    @if(auth()->id() === $reply->user_id)
+                        <button type="button" wire:click="deleteComment({{ $reply->id }})"
+                                wire:confirm="Delete this comment?"
+                                class="text-[9px] font-bold text-red-400/80 hover:text-red-400 uppercase">Delete</button>
+                    @endif
+                </div>
+            </div>
+            <p class="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap">{{ $reply->body }}</p>
         </div>
 
-        <!-- Particles Effect (Alpine) -->
-        <template x-if="liked">
-            <div class="absolute inset-0 pointer-events-none">
-                <div class="absolute top-0 left-1/2 -translate-x-1/2 w-1 h-4 bg-indigo-400 rounded-full animate-ping"></div>
-            </div>
-        </template>
-    </button>
-    <span :class="liked ? 'text-indigo-400' : 'text-zinc-500'" class="text-[10px] font-black uppercase tracking-widest transition-colors duration-500">
-        {{ $post->likes()->count() }} Bytes
-    </span>
+        <div class="mt-2 ml-1 flex items-center gap-3">
+            <livewire:posts.comment-like :comment="$reply" :wire:key="'clike-'.$reply->id" />
+            <button type="button" wire:click="setReply({{ $reply->id }})"
+                    class="text-[9px] font-black text-indigo-400 uppercase tracking-widest hover:text-white transition-colors">
+                Reply
+            </button>
+        </div>
+
+        @foreach($reply->replies as $nested)
+            @include('livewire.posts.partials.comment-reply', ['reply' => $nested, 'depth' => $depth + 1])
+        @endforeach
+    </div>
 </div>
 
 
@@ -1276,7 +2093,7 @@ PATH: resources/views/livewire/posts/single-post.blade.php
         <div class="flex items-center space-x-4">
             <a href="{{ route('profile.show', $post->user) }}" class="w-12 h-12 rounded-2xl overflow-hidden border border-white/5 bg-zinc-800 flex items-center justify-center">
                 @if($post->user->avatar)
-                    <img src="{{ Storage::url($post->user->avatar) }}" class="w-full h-full object-cover">
+                    <img src="{{ $post->user->avatarUrl() }}" class="w-full h-full object-cover">
                 @else
                     <span class="text-indigo-400 font-bold italic">{{ substr($post->user->name, 0, 1) }}</span>
                 @endif
@@ -1290,9 +2107,14 @@ PATH: resources/views/livewire/posts/single-post.blade.php
         </div>
 
         @if(auth()->id() === $post->user_id)
-            <button @click="$dispatch('open-edit-modal', { postId: {{ $post->id }} })" class="p-2.5 rounded-xl bg-zinc-800/50 text-zinc-500 hover:text-white transition-all opacity-0 group-hover:opacity-100">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
-            </button>
+            <div class="flex items-center gap-2">
+                <button @click="$dispatch('open-edit-modal', { postId: {{ $post->id }} })" class="p-2.5 rounded-xl bg-zinc-800/50 text-zinc-500 hover:text-white transition-all opacity-0 group-hover:opacity-100">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                </button>
+                <button x-on:click="if(confirm('Delete this post?')) Livewire.dispatch('delete-post', { postId: {{ $post->id }} })" class="p-2.5 rounded-xl bg-zinc-800/50 text-zinc-500 hover:text-rose-400 transition-all opacity-0 group-hover:opacity-100">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                </button>
+            </div>
         @endif
     </div>
 
@@ -1301,12 +2123,12 @@ PATH: resources/views/livewire/posts/single-post.blade.php
 
     <!-- MEDIA GRID (Gallery Wired) -->
     @if($post->images->count())
-        @php $imgUrls = $post->images->map(fn($i) => Storage::url($i->path))->toArray(); @endphp
+        @php $imgUrls = $post->images->map(fn($i) => $i->url())->toArray(); @endphp
         <div class="grid {{ $post->images->count() == 1 ? 'grid-cols-1' : 'grid-cols-2' }} gap-2 rounded-3xl overflow-hidden border border-white/5 shadow-2xl">
             @foreach($post->images->take(4) as $index => $img)
                 <div class="relative aspect-square cursor-zoom-in group/img overflow-hidden"
                      @click="$dispatch('open-gallery', { images: {{ json_encode($imgUrls) }}, index: {{ $index }} })">
-                    <img src="{{ Storage::url($img->path) }}" class="w-full h-full object-cover transition-transform duration-700 group-hover/img:scale-110">
+                    <img src="{{ $img->url() }}" class="w-full h-full object-cover transition-transform duration-700 group-hover/img:scale-110">
 
                     @if($loop->index == 3 && $post->images->count() > 4)
                         <div class="absolute inset-0 bg-zinc-950/60 backdrop-blur-sm flex items-center justify-center">
@@ -1339,57 +2161,82 @@ PATH: resources/views/livewire/posts/single-post.blade.php
 FILE: users/edit.blade.php
 PATH: resources/views/livewire/users/edit.blade.php
 ========================================
-<div x-data="{
-    avatarPreview: null,
-    bannerPreview: null,
-    openBio: false
-}"
-     @open-bio-modal.window="openBio = true"
-     class="relative">
+<div x-data="{ avatarPreview: null, bannerPreview: null }" class="w-full min-h-screen bg-zinc-950 py-10 px-4 sm:px-6">
+  <div class="max-w-2xl mx-auto">
+    @if (session()->has('success'))
+      <div class="mb-6 bg-indigo-500/10 border border-indigo-500/30 text-indigo-200 text-sm font-semibold px-5 py-4 rounded-2xl">
+        {{ session('success') }}
+      </div>
+    @endif
 
-    <!-- Hidden File Inputs -->
-    <form wire:submit.prevent="update" class="hidden">
-        <input type="file" wire:model="newAvatar" id="avatar-upload" @change="avatarPreview = URL.createObjectURL($event.target.files[0])">
-        <input type="file" wire:model="newBanner" id="banner-upload" @change="bannerPreview = URL.createObjectURL($event.target.files[0])">
+    <div class="mb-8">
+      <a href="{{ route('profile.show', auth()->user()->name) }}" wire:navigate
+         class="text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-white transition-colors">
+        ← Back to profile
+      </a>
+      <h1 class="mt-4 text-3xl font-black text-white italic uppercase tracking-tighter">
+        Adjust <span class="text-indigo-500">Identity</span>
+      </h1>
+      <p class="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mt-1">Update avatar, banner, and bio</p>
+    </div>
+
+    <form wire:submit.prevent="update" class="space-y-8 bg-zinc-900/40 border border-white/10 rounded-[2.5rem] p-8 shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]">
+      <div class="relative group h-48 rounded-[2rem] overflow-hidden bg-zinc-950 border border-white/5">
+        <template x-if="bannerPreview">
+          <img :src="bannerPreview" alt="" class="w-full h-full object-cover">
+        </template>
+        <template x-if="!bannerPreview">
+          @if(auth()->user()->bannerUrl())
+            <img src="{{ auth()->user()->bannerUrl() }}" alt="" class="w-full h-full object-cover">
+          @else
+            <div class="w-full h-full bg-gradient-to-br from-indigo-950 via-zinc-950 to-violet-950"></div>
+          @endif
+        </template>
+        <label class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+          <span class="bg-white text-zinc-950 px-6 py-3 rounded-xl font-black text-[10px] tracking-widest uppercase">Change Banner</span>
+          <input type="file" wire:model="newBanner" class="hidden" accept="image/*"
+                 @change="bannerPreview = $event.target.files[0] ? URL.createObjectURL($event.target.files[0]) : null">
+        </label>
+        <div wire:loading wire:target="newBanner" class="absolute bottom-3 right-3 text-[10px] font-bold text-white/70 uppercase">Uploading…</div>
+      </div>
+
+      <div class="flex flex-col sm:flex-row items-start gap-8">
+        <div class="relative w-32 h-32 rounded-3xl overflow-hidden bg-zinc-950 border border-white/10 shrink-0 group">
+          <template x-if="avatarPreview">
+            <img :src="avatarPreview" alt="" class="w-full h-full object-cover">
+          </template>
+          <template x-if="!avatarPreview">
+            <img src="{{ auth()->user()->avatarUrl() }}" alt="" class="w-full h-full object-cover">
+          </template>
+          <label class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+            <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path></svg>
+            <input type="file" wire:model="newAvatar" class="hidden" accept="image/*"
+                   @change="avatarPreview = $event.target.files[0] ? URL.createObjectURL($event.target.files[0]) : null">
+          </label>
+        </div>
+
+        <div class="flex-1 w-full">
+          <label class="text-[9px] font-black text-zinc-500 uppercase tracking-[0.3em] mb-3 block">Bio Signature</label>
+          <textarea wire:model="newBio"
+                    class="w-full bg-zinc-950 border border-white/5 rounded-2xl p-5 text-sm text-white focus:ring-1 focus:ring-indigo-500/50 outline-none h-32 resize-none"
+                    placeholder="Enter your identity signature..."></textarea>
+          @error('newBio') <p class="text-red-400 text-xs mt-2">{{ $message }}</p> @enderror
+        </div>
+      </div>
+
+      @error('newAvatar') <p class="text-red-400 text-xs">{{ $message }}</p> @enderror
+      @error('newBanner') <p class="text-red-400 text-xs">{{ $message }}</p> @enderror
+
+      <button type="submit"
+              class="w-full py-4 bg-indigo-500 text-white rounded-2xl font-black uppercase tracking-[0.2em] text-xs hover:bg-indigo-600 transition-all active:scale-95 flex items-center justify-center gap-2">
+        <span wire:loading.remove wire:target="update">Synchronize Identity</span>
+        <span wire:loading wire:target="update" class="flex items-center gap-2">
+          <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+          Processing…
+        </span>
+      </button>
     </form>
-
-    <!-- Bio Modal -->
-    <div x-show="openBio" x-cloak class="fixed inset-0 z-[150] flex items-center justify-center p-6 bg-zinc-950/80 backdrop-blur-md">
-        <div class="bg-zinc-900 border border-white/10 w-full max-w-lg rounded-[2.5rem] p-10 shadow-2xl" @click.away="openBio = false">
-            <h2 class="text-xl font-black text-white italic mb-6 uppercase tracking-tighter">Update <span class="text-indigo-400">Signature</span></h2>
-            <textarea wire:model="newBio" class="w-full bg-zinc-800/40 border-none rounded-2xl p-4 text-white resize-none min-h-[120px] focus:ring-1 focus:ring-indigo-500/50 mb-6"></textarea>
-            <div class="flex justify-end space-x-6">
-                <button @click="openBio = false" class="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Discard</button>
-                <button wire:click="update" @click="openBio = false" class="px-8 py-3 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest hover:scale-105 transition-all">Save Changes</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Avatar Preview Adjust -->
-    <div x-show="avatarPreview" x-cloak class="fixed inset-0 z-[160] flex items-center justify-center p-6 bg-zinc-950/90 backdrop-blur-2xl">
-        <div class="bg-zinc-900 border border-white/10 w-full max-w-md rounded-[3rem] p-12 text-center shadow-2xl">
-            <div class="w-56 h-56 mx-auto mb-10 rounded-[3rem] overflow-hidden border-4 border-indigo-500/30 shadow-2xl">
-                <img :src="avatarPreview" class="w-full h-full object-cover">
-            </div>
-            <div class="flex justify-center space-x-8">
-                <button @click="avatarPreview = null" class="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Discard</button>
-                <button wire:click="update" @click="avatarPreview = null" class="px-10 py-4 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest hover:scale-105 transition-all">Apply Identity</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Banner Preview Adjust -->
-    <div x-show="bannerPreview" x-cloak class="fixed inset-0 z-[160] flex items-center justify-center p-6 bg-zinc-950/90 backdrop-blur-2xl">
-        <div class="bg-zinc-900 border border-white/10 w-full max-w-2xl rounded-[3rem] p-12 text-center shadow-2xl">
-            <div class="h-48 w-full mb-10 rounded-3xl overflow-hidden border-2 border-dashed border-white/20">
-                <img :src="bannerPreview" class="w-full h-full object-cover">
-            </div>
-            <div class="flex justify-center space-x-8">
-                <button @click="bannerPreview = null" class="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Discard</button>
-                <button wire:click="update" @click="bannerPreview = null" class="px-10 py-4 bg-white text-zinc-950 rounded-full font-black text-[10px] uppercase tracking-widest hover:scale-105 transition-all">Apply Banner</button>
-            </div>
-        </div>
-    </div>
+  </div>
 </div>
 
 
@@ -1426,169 +2273,128 @@ PATH: resources/views/livewire/users/follow.blade.php
 FILE: users/show.blade.php
 PATH: resources/views/livewire/users/show.blade.php
 ========================================
-<div x-data="{
-    tab: 'posts',
-    wakingUp: false,
-    previewImage: null,
-    images: [],
-    galleryIndex: 0
-}"
-     x-init="setTimeout(() => wakingUp = true, 100)"
-     class="w-full min-h-screen pb-20">
+<div x-data="{ followersOpen: false, followingOpen: false }" class="w-full min-h-screen bg-zinc-950">
+  <div class="relative h-[280px] w-full overflow-hidden">
+    @if($user->bannerUrl())
+      <img src="{{ $user->bannerUrl() }}" alt="" class="w-full h-full object-cover">
+    @else
+      <div class="w-full h-full bg-gradient-to-br from-indigo-950 via-zinc-950 to-violet-950"></div>
+    @endif
+    <div class="absolute inset-0 bg-gradient-to-t from-zinc-950 via-zinc-950/40 to-transparent"></div>
+  </div>
 
-    <!-- THE HEADER (Full Width standard) -->
-    <div class="max-w-4xl mx-auto mb-12">
-        <div class="relative w-full rounded-[3.5rem] overflow-hidden border border-white/10 bg-zinc-900/40 backdrop-blur-xl shadow-2xl">
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 -mt-24 relative z-10 pb-20">
+    <div class="bg-zinc-900/40 backdrop-blur-xl border border-white/10 rounded-[2.5rem] p-8 sm:p-10 shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]">
+      <div class="flex flex-col sm:flex-row sm:items-end gap-6 sm:justify-between">
+        <div class="flex flex-col sm:flex-row sm:items-end gap-6">
+          <img src="{{ $user->avatarUrl() }}" alt="{{ $user->name }}"
+               class="w-32 h-32 sm:w-36 sm:h-36 rounded-[2rem] object-cover border-4 border-zinc-950 shadow-2xl shrink-0">
 
-            <!-- BANNER -->
-            <div class="relative h-64 md:h-80 w-full group overflow-hidden bg-zinc-800">
-                @if($user->banner)
-                    <img src="{{ Storage::url($user->banner) }}" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-1000">
-                @else
-                    <div class="w-full h-full bg-gradient-to-br from-indigo-950/40 via-zinc-900 to-indigo-900/20"></div>
-                @endif
-
-                @if(auth()->id() === $user->id)
-                    <label for="banner-upload" class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer z-10">
-                        <span class="bg-white text-zinc-950 px-6 py-2 rounded-full font-black text-[10px] uppercase tracking-widest">Change Banner</span>
-                    </label>
-                @endif
-            </div>
-
-            <!-- IDENTITY AREA -->
-            <div class="relative px-8 md:px-12 pb-10 flex flex-col md:flex-row items-end md:items-center justify-between -mt-16 md:-mt-20 gap-6">
-                <div class="flex flex-col md:flex-row items-end md:items-center gap-6">
-                    <!-- AVATAR -->
-                    <div class="relative group">
-                        <div class="w-32 h-32 md:w-44 md:h-48 rounded-[3rem] overflow-hidden border-8 border-[#09090b] bg-zinc-900 shadow-2xl flex items-center justify-center">
-                            @if($user->avatar)
-                                <img src="{{ Storage::url($user->avatar) }}" class="w-full h-full object-cover">
-                            @else
-                                <span class="text-indigo-400 text-5xl font-black italic">{{ substr($user->name, 0, 1) }}</span>
-                            @endif
-                        </div>
-                        @if(auth()->id() === $user->id)
-                            <label for="avatar-upload" class="absolute inset-0 flex items-center justify-center bg-black/40 rounded-[3rem] opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
-                                <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
-                            </label>
-                        @endif
-                    </div>
-
-                    <div class="flex flex-col mb-2">
-                        <h1 class="text-3xl font-black tracking-tighter text-white italic flex items-center uppercase">
-                            {{ $user->name }}
-                            <span class="w-2.5 h-3 bg-indigo-500 rounded-full ml-3 shadow-[0_0_15px_rgba(99,102,241,1)] pulse-glow"></span>
-                        </h1>
-                        <p class="text-zinc-500 text-sm font-medium tracking-tight mt-1 max-w-xs">
-                            {{ $user->bio ?? 'No bio signature yet.' }}
-                            @if(auth()->id() === $user->id)
-                                <button @click="$dispatch('open-bio-modal')" class="ml-2 text-indigo-400 hover:text-white transition-colors text-xs uppercase font-black">Edit</button>
-                            @endif
-                        </p>
-                    </div>
-                </div>
-
-                @if(auth()->id() !== $user->id)
-                    <livewire:users.follow :targetId="$user->id" />
-                @endif
-            </div>
-
-            <!-- TABS -->
-            <div class="border-t border-white/5 flex items-center px-8 bg-zinc-950/20">
-                <button @click="tab = 'posts'" :class="tab === 'posts' ? 'text-white border-indigo-500' : 'text-zinc-600 border-transparent'" class="py-5 px-6 text-[10px] font-black uppercase tracking-[0.3em] border-b-2 transition-all">Bytes</button>
-                <button @click="tab = 'followers'" :class="tab === 'followers' ? 'text-white border-indigo-500' : 'text-zinc-600 border-transparent'" class="py-5 px-6 text-[10px] font-black uppercase tracking-[0.3em] border-b-2 transition-all">{{ $user->followers()->count() }} Followers</button>
-                <button @click="tab = 'following'" :class="tab === 'following' ? 'text-white border-indigo-500' : 'text-zinc-600 border-transparent'" class="py-5 px-6 text-[10px] font-black uppercase tracking-[0.3em] border-b-2 transition-all">{{ $user->following()->count() }} Following</button>
-            </div>
+          <div class="pb-1">
+            <h1 class="text-4xl sm:text-5xl font-black text-white italic tracking-tighter uppercase">
+              {{ $user->name }}
+              <span class="inline-block w-2.5 h-2.5 bg-indigo-500 rounded-full animate-pulse ml-2 align-middle"></span>
+            </h1>
+            <p class="text-zinc-400 mt-2 max-w-md font-medium leading-relaxed">
+              {{ $user->bio ?? 'No bio signature yet.' }}
+            </p>
+          </div>
         </div>
+
+        <div class="shrink-0">
+          @if(auth()->id() === $user->id)
+            <a href="{{ route('profile.edit') }}" wire:navigate
+               class="inline-flex px-6 py-3 bg-white/10 hover:bg-white/15 border border-white/10 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all active:scale-95">
+              Adjust Identity
+            </a>
+          @else
+            <livewire:users.follow :targetId="$user->id" />
+          @endif
+        </div>
+      </div>
+
+      <div class="flex items-center gap-10 sm:gap-12 mt-10 pt-8 border-t border-white/5">
+        <div>
+          <span class="block text-2xl font-black text-white tracking-tighter">{{ $user->posts_count }}</span>
+          <span class="text-[10px] font-black text-zinc-500 uppercase tracking-[0.3em]">Bytes</span>
+        </div>
+        <button type="button" @click="followersOpen = true" class="text-left group">
+          <span class="block text-2xl font-black text-white tracking-tighter group-hover:text-indigo-400 transition-colors">{{ $user->followers_count }}</span>
+          <span class="text-[10px] font-black text-zinc-500 uppercase tracking-[0.3em] group-hover:text-indigo-400/80 transition-colors">Followers</span>
+        </button>
+        <button type="button" @click="followingOpen = true" class="text-left group">
+          <span class="block text-2xl font-black text-white tracking-tighter group-hover:text-indigo-400 transition-colors">{{ $user->following_count }}</span>
+          <span class="text-[10px] font-black text-zinc-500 uppercase tracking-[0.3em] group-hover:text-indigo-400/80 transition-colors">Following</span>
+        </button>
+      </div>
     </div>
 
-    <!-- FEED CONTENT (Centered max-w-2xl) -->
-    <div class="max-w-2xl mx-auto px-4">
-
-        <!-- POSTS TAB -->
-        <div x-show="tab === 'posts'" x-transition>
-            @forelse($posts as $post)
-                <div class="bg-zinc-900/40 border border-white/10 rounded-[2.5rem] p-6 backdrop-blur-xl mb-8 hover:border-white/20 transition-all duration-500 group">
-                    <!-- Post Header -->
-                    <div class="flex items-center justify-between mb-6 px-2">
-                        <div class="flex items-center space-x-4">
-                            <div class="w-10 h-10 rounded-2xl overflow-hidden border border-white/5 bg-zinc-800 flex items-center justify-center font-bold italic text-indigo-400">
-                                @if($post->user->avatar)
-                                    <img src="{{ Storage::url($post->user->avatar) }}" class="w-full h-full object-cover">
-                                @else
-                                    {{ substr($post->user->name, 0, 1) }}
-                                @endif
-                            </div>
-                            <div class="flex flex-col">
-                                <span class="text-zinc-100 font-black tracking-tighter text-sm uppercase italic">{{ $post->user->name }}</span>
-                                <span class="text-[9px] text-zinc-600 font-bold uppercase tracking-widest">{{ $post->created_at->diffForHumans() }}</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Post Body -->
-                    <p class="text-lg text-zinc-200 leading-relaxed tracking-tight px-2 mb-6">{{ $post->body }}</p>
-
-                    <!-- Media Grid -->
-                    @if($post->images->count())
-                        <div class="grid {{ $post->images->count() == 1 ? 'grid-cols-1' : 'grid-cols-2' }} gap-2 rounded-[2rem] overflow-hidden border border-white/5">
-                            @foreach($post->images as $img)
-                                <div class="relative aspect-square cursor-zoom-in group/img overflow-hidden"
-                                     @click="previewImage = '{{ Storage::url($img->path) }}'">
-                                    <img src="{{ Storage::url($img->path) }}" class="w-full h-full object-cover transition-transform duration-700 group-hover/img:scale-110">
-                                </div>
-                            @endforeach
-                        </div>
-                    @endif
-
-                    <!-- Actions -->
-                    <div class="mt-8 pt-6 border-t border-white/5 flex items-center justify-between gap-4 px-2">
-                        <div class="flex-1"><livewire:posts.like :post="$post" :key="'like-'.$post->id" /></div>
-                        <button @click="$dispatch('open-comment-modal', { postId: {{ $post->id }} })"
-                                class="flex-1 flex items-center justify-center space-x-3 py-3 rounded-2xl bg-zinc-800/30 hover:bg-zinc-800/80 border border-white/5 text-zinc-500 hover:text-white transition-all">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
-                            <span class="text-[10px] font-black uppercase tracking-widest">Thread</span>
-                        </button>
-                    </div>
-                </div>
-            @empty
-                <p class="text-center text-zinc-700 text-[10px] font-bold py-20 uppercase tracking-widest italic">Zero bytes found.</p>
-            @endforelse
+    <div class="mt-10 space-y-6">
+      @forelse($posts as $post)
+        <x-post-card :post="$post" />
+      @empty
+        <div class="py-16 text-center bg-zinc-900/40 border border-white/10 rounded-[2.5rem] px-6">
+          @if(auth()->id() === $user->id)
+            <p class="text-zinc-300 text-base">You haven't posted anything yet.</p>
+            <p class="text-zinc-500 text-sm mt-2">Share something whenever you feel like it.</p>
+            <a href="{{ route('post.create') }}" wire:navigate
+               class="mt-5 inline-block text-indigo-400 text-sm font-semibold hover:text-white transition-colors">
+              Write a post →
+            </a>
+          @else
+            <p class="text-zinc-300 text-base">{{ $user->name }} hasn't posted anything yet.</p>
+            <p class="text-zinc-500 text-sm mt-2">Check back another time.</p>
+          @endif
         </div>
-
-        <!-- FOLLOWERS/FOLLOWING TABS -->
-        <div x-show="tab === 'followers'" x-transition class="grid grid-cols-2 gap-4">
-            @foreach($followersList as $item)
-                <a href="{{ route('profile.show', $item) }}" class="p-4 bg-zinc-900/40 border border-white/5 rounded-3xl flex items-center space-x-4">
-                    <div class="w-10 h-10 rounded-xl bg-zinc-800 flex items-center justify-center font-bold text-indigo-400 italic">
-                        {{ substr($item->name, 0, 1) }}
-                    </div>
-                    <span class="text-white text-xs font-bold uppercase tracking-tight">{{ $item->name }}</span>
-                </a>
-            @endforeach
-        </div>
-
-        <div x-show="tab === 'following'" x-transition class="grid grid-cols-2 gap-4">
-            @foreach($followingList as $item)
-                <a href="{{ route('profile.show', $item) }}" class="p-4 bg-zinc-900/40 border border-white/5 rounded-3xl flex items-center space-x-4">
-                    <div class="w-10 h-10 rounded-xl bg-zinc-800 flex items-center justify-center font-bold text-indigo-400 italic">
-                        {{ substr($item->name, 0, 1) }}
-                    </div>
-                    <span class="text-white text-xs font-bold uppercase tracking-tight">{{ $item->name }}</span>
-                </a>
-            @endforeach
-        </div>
-
+      @endforelse
     </div>
+  </div>
 
-    <!-- IMAGE ZOOM MODAL -->
-    <div x-show="previewImage" x-cloak class="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/95 backdrop-blur-xl p-8" @click="previewImage = null">
-        <button class="absolute top-8 right-8 text-white/50 hover:text-white text-4xl">&times;</button>
-        <img :src="previewImage" class="max-w-full max-h-full rounded-lg shadow-2xl">
+  {{-- Followers modal --}}
+  <div x-show="followersOpen" x-cloak @keydown.escape.window="followersOpen = false"
+       class="fixed inset-0 z-[240] flex items-center justify-center p-4">
+    <button type="button" @click="followersOpen = false" class="absolute inset-0 bg-zinc-950/90 backdrop-blur-xl" aria-label="Close"></button>
+    <div class="relative w-full max-w-md bg-zinc-900/95 border border-white/10 rounded-[2rem] shadow-2xl max-h-[70vh] flex flex-col z-10" @click.stop>
+      <div class="p-6 border-b border-white/5 flex items-center justify-between shrink-0">
+        <h2 class="text-lg font-black text-white italic uppercase tracking-tighter">Followers</h2>
+        <button type="button" @click="followersOpen = false" class="w-8 h-8 flex items-center justify-center bg-white/5 rounded-full text-zinc-400 hover:text-white">✕</button>
+      </div>
+      <div class="overflow-y-auto p-4 space-y-2 custom-scrollbar">
+        @forelse($followersList as $follower)
+          <a href="{{ route('profile.show', $follower->name) }}" wire:navigate @click="followersOpen = false"
+             class="flex items-center gap-3 p-3 rounded-2xl hover:bg-white/5 transition-colors">
+            <img src="{{ $follower->avatarUrl() }}" alt="" class="w-10 h-10 rounded-xl object-cover border border-white/10">
+            <span class="text-sm font-black text-white uppercase tracking-tight">{{ $follower->name }}</span>
+          </a>
+        @empty
+          <p class="text-center text-zinc-500 text-sm py-8">No followers yet.</p>
+        @endforelse
+      </div>
     </div>
+  </div>
 
-    <!-- INCLUDE EDIT LOGIC -->
-    <livewire:users.edit />
+  {{-- Following modal --}}
+  <div x-show="followingOpen" x-cloak @keydown.escape.window="followingOpen = false"
+       class="fixed inset-0 z-[240] flex items-center justify-center p-4">
+    <button type="button" @click="followingOpen = false" class="absolute inset-0 bg-zinc-950/90 backdrop-blur-xl" aria-label="Close"></button>
+    <div class="relative w-full max-w-md bg-zinc-900/95 border border-white/10 rounded-[2rem] shadow-2xl max-h-[70vh] flex flex-col z-10" @click.stop>
+      <div class="p-6 border-b border-white/5 flex items-center justify-between shrink-0">
+        <h2 class="text-lg font-black text-white italic uppercase tracking-tighter">Following</h2>
+        <button type="button" @click="followingOpen = false" class="w-8 h-8 flex items-center justify-center bg-white/5 rounded-full text-zinc-400 hover:text-white">✕</button>
+      </div>
+      <div class="overflow-y-auto p-4 space-y-2 custom-scrollbar">
+        @forelse($followingList as $followed)
+          <a href="{{ route('profile.show', $followed->name) }}" wire:navigate @click="followingOpen = false"
+             class="flex items-center gap-3 p-3 rounded-2xl hover:bg-white/5 transition-colors">
+            <img src="{{ $followed->avatarUrl() }}" alt="" class="w-10 h-10 rounded-xl object-cover border border-white/10">
+            <span class="text-sm font-black text-white uppercase tracking-tight">{{ $followed->name }}</span>
+          </a>
+        @empty
+          <p class="text-center text-zinc-500 text-sm py-8">Not following anyone yet.</p>
+        @endforelse
+      </div>
+    </div>
+  </div>
 </div>
 
 
@@ -1630,7 +2436,7 @@ PATH: resources/views/layouts/app.blade.php
 
         body {
             font-family: 'Inter', sans-serif;
-            background-color: #0b0e14;
+            background-color: #09090b;
             color: #e2e8f0;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
@@ -1639,16 +2445,26 @@ PATH: resources/views/layouts/app.blade.php
     @livewireStyles
 </head>
 
-<body class="min-h-screen flex flex-col">
+<body class="min-h-screen flex flex-col bg-zinc-950 text-zinc-100"
+      x-data="{ pageTransition: false }"
+      x-on:livewire:navigate-start.window="pageTransition = true"
+      x-on:livewire:navigate-end.window="pageTransition = false">
     <x-navigation/>
 
-    <main class="flex-grow flex flex-col items-center">
-        <div class="w-full max-w-2xl px-4 py-12"> <!-- Max-w-2xl is the standard "Feed" width -->
+    <main class="flex-grow flex flex-col items-center w-full"
+          :class="pageTransition ? 'opacity-50 scale-[0.98]' : 'opacity-100 scale-100'"
+          style="transition: opacity 0.3s ease, transform 0.3s ease;">
+        <div class="w-full {{ Route::is('home') ? '' : 'max-w-2xl px-4 py-12' }}">
             {{ $slot }}
         </div>
     </main>
 
+
+
 @livewireScripts
+
+    <livewire:posts.comments />
+
     <!-- GLOBAL MEDIA GALLERY -->
     <div x-data="{
     open: false,
@@ -1663,7 +2479,7 @@ PATH: resources/views/layouts/app.blade.php
     prev() { this.index = (this.index - 1 + this.images.length) % this.images.length }
 }"
          @open-gallery.window="show($event.detail.images, $event.detail.index)"
-         x-show="open" x-cloak class="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/95 backdrop-blur-xl transition-all"
+         x-show="open" x-cloak @click.self="open = false" class="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/95 backdrop-blur-xl transition-all"
          x-on:keydown.right.window="next()" x-on:keydown.left.window="prev()" x-on:keydown.escape.window="open = false">
 
         <button @click="open = false" class="absolute top-8 right-8 text-white/50 hover:text-white transition-colors z-[210]">
@@ -1695,53 +2511,121 @@ PATH: resources/views/layouts/app.blade.php
 
 
 ========================================
+FILE: wide.blade.php
+PATH: resources/views/layouts/wide.blade.php
+========================================
+<!DOCTYPE html>
+<html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <title>{{ $title ?? config('app.name') }}</title>
+
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
+    @livewireStyles
+</head>
+
+<body class="min-h-screen flex flex-col bg-zinc-950 text-zinc-100 antialiased">
+    <x-navigation/>
+
+    <main class="flex-grow w-full">
+        {{ $slot }}
+    </main>
+
+    @livewireScripts
+
+    <livewire:posts.comments />
+
+    <div x-data="{
+            open: false,
+            images: [],
+            index: 0,
+            show(imgArray, startAt) {
+                this.images = imgArray;
+                this.index = startAt;
+                this.open = true;
+            },
+            next() { this.index = (this.index + 1) % this.images.length },
+            prev() { this.index = (this.index - 1 + this.images.length) % this.images.length }
+         }"
+         @open-gallery.window="show($event.detail.images, $event.detail.index)"
+         x-show="open"
+         x-cloak
+         @click.self="open = false"
+         class="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/95 backdrop-blur-xl"
+         x-on:keydown.right.window="next()"
+         x-on:keydown.left.window="prev()"
+         x-on:keydown.escape.window="open = false">
+
+        <button @click="open = false" class="absolute top-8 right-8 text-white/50 hover:text-white transition-colors z-[210]">
+            <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
+
+        <template x-if="images.length > 1">
+            <div class="absolute inset-x-8 flex justify-between items-center pointer-events-none">
+                <button @click="prev()" type="button" class="pointer-events-auto p-4 rounded-full bg-white/5 hover:bg-white/10 text-white transition-all">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                </button>
+                <button @click="next()" type="button" class="pointer-events-auto p-4 rounded-full bg-white/5 hover:bg-white/10 text-white transition-all">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                </button>
+            </div>
+        </template>
+
+        <div class="relative max-w-5xl max-h-[85vh] flex flex-col items-center px-4">
+            <img :src="images[index]" alt="" class="max-w-full max-h-full object-contain shadow-2xl rounded-lg">
+            <div class="mt-6 px-4 py-2 bg-white/5 rounded-full text-[10px] font-black text-white/40 uppercase tracking-[0.3em]">
+                Byte <span x-text="index + 1" class="text-indigo-400"></span> of <span x-text="images.length"></span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
+
+========================================
 FILE: navigation.blade.php
 PATH: resources/views/components/navigation.blade.php
 ========================================
-<nav class="w-full border-b border-white/5 bg-[#0b0e14]/80 backdrop-blur-md sticky top-0 z-50">
-    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center">
+<nav class="w-full border-b border-white/5 bg-zinc-950/80 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
 
-        <!-- Left Column: Logo (Takes 1/3 of the space) -->
-        <div class="flex-1 flex justify-start">
-            <a href="/" class="flex-shrink-0 flex items-center group cursor-pointer">
-                <div class="w-8 h-8 bg-gradient-to-br from-indigo-500 to-violet-600 rounded-lg flex items-center justify-center shadow-[0_0_15px_rgba(99,102,241,0.4)] group-hover:scale-110 group-hover:shadow-[0_0_25px_rgba(99,102,241,0.8)] transition-all duration-300">
+        <!-- Logo -->
+        <div class="flex-shrink-0">
+            <a href="{{ auth()->check() ? route('feed') : '/' }}" wire:navigate class="flex items-center group">
+                <div class="w-8 h-8 bg-gradient-to-br from-indigo-500 to-violet-600 rounded-lg flex items-center justify-center shadow-[0_0_15px_rgba(99,102,241,0.4)] group-hover:scale-110 transition-all duration-300">
                     <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                 </div>
                 <span class="ml-3 text-lg font-black tracking-tighter text-white italic">
-                    Byte<span class="text-indigo-400 brightness-150 drop-shadow-[0_0_12px_rgba(129,140,248,0.7)] transition-all duration-300">Book</span>Letter
+                    Byte<span class="text-indigo-400">Book</span>Letter
                 </span>
             </a>
         </div>
 
-        <!-- Center Column: Links (Takes 1/3 of the space - PERFECTLY CENTERED) -->
-        <div class="flex-1 flex justify-center">
-            <div class="hidden md:flex items-center space-x-8 text-sm font-medium text-gray-400">
-                @auth
-                    <a href="#" class="hover:text-white transition-colors">Feed</a>
-                    <a href="#" class="hover:text-white transition-colors">Following</a>
-                    <a href="{{ route('post.create') }}" class="text-white hover:text-indigo-400 transition-colors">Create</a>
-                @endauth
-            </div>
+        <!-- Center Nav Links -->
+        <div class="flex items-center space-x-8 text-sm font-medium text-zinc-400">
+            @auth
+                <a href="{{ route('feed') }}" wire:navigate class="hover:text-indigo-400 transition-colors {{ request()->routeIs('feed') ? 'text-indigo-400' : '' }}">Feed</a>
+                <a href="{{ route('following') }}" wire:navigate class="hover:text-indigo-400 transition-colors {{ request()->routeIs('following') ? 'text-indigo-400' : '' }}">Following</a>
+                <a href="{{ route('post.create') }}" wire:navigate class="hover:text-indigo-400 transition-colors {{ request()->routeIs('post.create') ? 'text-indigo-400' : '' }}">Create</a>
+            @endauth
         </div>
 
-        <!-- Right Column: Auth Actions (Takes 1/3 of the space) -->
-        <div class="flex-1 flex justify-end items-center">
+        <!-- Right: Search + Profile -->
+        <div class="flex items-center space-x-4">
             @auth
-                <!-- Avatar for Signed In Users -->
-                <button class="relative group">
-                    <div class="w-9 h-9 rounded-full border-2 border-gray-700 overflow-hidden group-hover:border-indigo-500 transition-all">
-                        <img src="https://ui-avatars.com/api/?name={{ auth()->user()->name }}&background=312e81&color=fff" alt="User">
-                    </div>
-                </button>
+                <livewire:global-search />
+                <a href="{{ route('profile.show', auth()->user()->name) }}" wire:navigate class="relative group" title="Your profile">
+                    <img src="{{ auth()->user()->avatarUrl() }}" alt="{{ auth()->user()->name }}"
+                         class="w-9 h-9 rounded-full border-2 border-zinc-700 object-cover group-hover:border-indigo-500 transition-all">
+                </a>
             @endauth
 
             @guest
-                <!-- Login & Register for Guests -->
                 <div class="flex items-center space-x-5">
-                    <a href="{{ route('login') }}" class="text-sm font-semibold text-gray-400 hover:text-white transition-colors">
-                        Log in
-                    </a>
-                    <a href="{{ route('register') }}" class="relative group px-5 py-2">
+                    <a href="{{ route('login') }}" wire:navigate class="text-sm font-semibold text-zinc-400 hover:text-white transition-colors">Log in</a>
+                    <a href="{{ route('register') }}" wire:navigate class="relative group px-5 py-2">
                         <div class="absolute inset-0 bg-gradient-to-r from-indigo-600 to-violet-600 rounded-lg blur-sm opacity-40 group-hover:opacity-100 transition-opacity duration-300"></div>
                         <div class="relative bg-gradient-to-r from-indigo-500 to-violet-600 px-5 py-2 rounded-lg text-sm font-bold text-white shadow-lg active:scale-95 transition-all">
                             Get Started
@@ -1750,9 +2634,110 @@ PATH: resources/views/components/navigation.blade.php
                 </div>
             @endguest
         </div>
-
     </div>
 </nav>
+
+
+========================================
+FILE: post-card.blade.php
+PATH: resources/views/components/post-card.blade.php
+========================================
+@props(['post'])
+@php
+    $imageUrls = $post->images->map(fn ($image) => $image->url())->values()->all();
+    $privacyIcon = match($post->privacy->value) {
+        'public' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>',
+        'friends' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>',
+        'private' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>',
+    };
+    $privacyLabel = $post->privacy->label();
+@endphp
+<div class="w-full mb-6" x-data="{ visible: false }" x-init="setTimeout(() => visible = true, 50)"
+     x-show="visible"
+     x-transition:enter="transition ease-out duration-500"
+     x-transition:enter-start="opacity-0 translate-y-4 scale-[0.98]"
+     x-transition:enter-end="opacity-100 translate-y-0 scale-100">
+    <div class="bg-zinc-900/40 backdrop-blur-xl border border-white/10 rounded-[2.5rem] overflow-hidden shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)] transition-all hover:border-white/20">
+
+        <div class="p-6 flex items-center justify-between gap-4">
+            <a href="{{ route('profile.show', $post->user->name) }}" wire:navigate class="flex items-center space-x-4 group min-w-0">
+                <img src="{{ $post->user->avatarUrl() }}" alt="{{ $post->user->name }}"
+                     class="w-12 h-12 rounded-2xl object-cover border border-white/10 group-hover:scale-105 transition-transform shrink-0">
+                <div class="min-w-0">
+                    <h4 class="text-white font-black italic tracking-tighter uppercase truncate group-hover:text-indigo-400 transition-colors">{{ $post->user->name }}</h4>
+                    <div class="flex items-center gap-2 mt-1">
+                        <span class="text-[10px] text-zinc-500 font-bold uppercase tracking-[0.2em]">{{ $post->created_at->diffForHumans() }}</span>
+                        <span class="text-zinc-700">·</span>
+                        <span class="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider {{ $post->privacy->value === 'public' ? 'text-emerald-500/60' : ($post->privacy->value === 'friends' ? 'text-amber-500/60' : 'text-rose-500/60') }}">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">{!! $privacyIcon !!}</svg>
+                            {{ $privacyLabel }}
+                        </span>
+                    </div>
+                </div>
+            </a>
+
+            @if(auth()->id() === $post->user_id)
+                <div class="shrink-0 flex items-center gap-2">
+                    <a href="{{ route('post.edit', $post) }}" wire:navigate
+                       title="Edit post"
+                       class="p-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-zinc-500 hover:text-white transition-all active:scale-90">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
+                        </svg>
+                    </a>
+                    <button type="button"
+                            x-on:click="if(confirm('Delete this post?')) Livewire.dispatch('delete-post', { postId: {{ $post->id }} })"
+                            title="Delete post"
+                            class="p-2.5 bg-white/5 hover:bg-rose-500/20 rounded-xl text-zinc-500 hover:text-rose-400 transition-all active:scale-90">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                        </svg>
+                    </button>
+                </div>
+            @endif
+        </div>
+
+        <div class="px-6 sm:px-8 pb-6">
+            <p class="text-zinc-200 text-lg leading-relaxed font-medium whitespace-pre-wrap">{{ $post->body }}</p>
+        </div>
+
+        @if($post->images->isNotEmpty())
+            <div class="px-6 pb-6">
+                <div class="grid gap-2 {{ $post->images->count() === 1 ? 'grid-cols-1' : 'grid-cols-2' }} rounded-[2rem] overflow-hidden">
+                    @foreach($post->images->take(4) as $index => $image)
+                        <div class="relative group cursor-zoom-in overflow-hidden {{ $post->images->count() === 1 ? 'max-h-[520px]' : 'aspect-square' }}"
+                             @click="$dispatch('open-gallery', { images: {{ \Illuminate\Support\Js::from($imageUrls) }}, index: {{ $index }} })">
+                            <img src="{{ $image->url() }}"
+                                 alt=""
+                                 class="w-full h-full object-cover hover:scale-[1.02] transition-transform duration-500 pointer-events-none">
+
+                            @if($loop->iteration === 4 && $post->images->count() > 4)
+                                <div class="absolute inset-0 bg-zinc-950/60 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+                                    <span class="text-2xl font-black text-white">+{{ $post->images->count() - 4 }}</span>
+                                </div>
+                            @endif
+                        </div>
+                    @endforeach
+                </div>
+            </div>
+        @endif
+
+        <div class="px-6 py-4 bg-zinc-950/40 border-t border-white/5 flex items-center justify-between gap-4">
+            <livewire:posts.like :post="$post" :wire:key="'like-'.$post->id" />
+
+            <button type="button"
+                    x-on:click="Livewire.dispatch('open-comment-modal', { postId: {{ $post->id }} })"
+                    class="flex items-center space-x-2 px-5 py-3 bg-zinc-800/20 hover:bg-zinc-800/40 border border-white/5 rounded-2xl transition-all active:scale-95 group">
+                <svg class="w-4 h-4 text-zinc-500 group-hover:text-indigo-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                </svg>
+                <span class="text-[9px] font-black uppercase tracking-[0.2em] text-zinc-500 group-hover:text-white">
+                    {{ $post->comments_count ?? 0 }} Thread{{ ($post->comments_count ?? 0) === 1 ? '' : 's' }}
+                </span>
+            </button>
+        </div>
+    </div>
+</div>
 
 
 ========================================
@@ -1762,28 +2747,29 @@ FILE: routes/web.php
 
 use App\Livewire\Auth\Login;
 use App\Livewire\Auth\Register;
+use App\Livewire\GlobalSearch;
 use App\Livewire\Posts\Create;
 use App\Livewire\Posts\Edit;
+use App\Livewire\Posts\Feed;
+use App\Livewire\Posts\FollowingFeed;
 use Illuminate\Support\Facades\Route;
+use App\Livewire\Users\{Show as ProfileShow, Edit as ProfileEdit};
 
 
-Route::get('/', function () {
-    return view('home');
-});
-
-use App\Livewire\Users\Show as ProfileShow;
-
-Route::get('/profile/{user}', ProfileShow::class)->name('profile.show');
+Route::get('/', function() { return view('home'); })->name('home');
 
 Route::middleware('guest')->group(function () {
-    Route::get('/register', Register::class)->name('register');
     Route::get('/login', Login::class)->name('login');
+    Route::get('/register', Register::class)->name('register');
 });
 
-
-Route::middleware('auth')->name('post.')->group(function () {
-    Route::get('/post/create', Create::class)->name('create');
-    Route::get('/post/{post}/edit', Edit::class)->name('edit');
+Route::middleware('auth')->group(function () {
+    Route::get('/feed', Feed::class)->name('feed');
+    Route::get('/following', FollowingFeed::class)->name('following');
+    Route::get('/post/create', Create::class)->name('post.create');
+    Route::get('/post/{post}/edit', Edit::class)->name('post.edit');
+    Route::get('/profile/edit', ProfileEdit::class)->name('profile.edit');
+    Route::get('/@{user:name}', ProfileShow::class)->name('profile.show');
 });
 
 

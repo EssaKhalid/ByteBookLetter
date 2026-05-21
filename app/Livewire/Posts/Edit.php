@@ -4,6 +4,7 @@ namespace App\Livewire\Posts;
 
 use App\Livewire\Forms\Posts\PostForm;
 use App\Models\Post;
+use Livewire\Attributes\Url;
 use Livewire\Component;
 use Livewire\WithFileUploads;
 
@@ -13,7 +14,8 @@ class Edit extends Component
 
     public PostForm $form;
     public Post $post;
-    public string $previousurl;
+    #[Url(as: 'back')]
+    public string $previousurl = '';
 
 
     public function mount(Post $post)
@@ -30,6 +32,11 @@ class Edit extends Component
         session()->flash('success_EditedPost', 'Your post has been edited.');
 
         return $this->redirect($this->previousurl, navigate: true);
+    }
+
+    public function cyclePrivacy()
+    {
+        $this->form->cyclePrivacy();
     }
 
     public function render()

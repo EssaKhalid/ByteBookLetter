@@ -17,7 +17,7 @@
                 </div>
 
                 <div class="flex-1 overflow-y-auto p-6 sm:p-8 space-y-6 custom-scrollbar min-h-0">
-                    @forelse($post->comments as $comment)
+                    @forelse($comments as $comment)
                         <div wire:key="comment-{{ $comment->id }}" class="flex gap-4">
                             <a href="{{ route('profile.show', $comment->user->name) }}" wire:navigate class="shrink-0">
                                 <img src="{{ $comment->user->avatarUrl() }}" alt="" class="w-10 h-10 rounded-xl object-cover border border-white/10">
@@ -41,10 +41,13 @@
                                     <p class="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">{{ $comment->body }}</p>
                                 </div>
 
-                                <button type="button" wire:click="setReply({{ $comment->id }})"
-                                        class="mt-2 ml-1 text-[9px] font-black text-indigo-400 uppercase tracking-widest hover:text-white transition-colors">
-                                    Reply
-                                </button>
+                                <div class="mt-2 ml-1 flex items-center gap-3">
+                                    <livewire:posts.comment-like :comment="$comment" :wire:key="'clike-'.$comment->id" />
+                                    <button type="button" wire:click="setReply({{ $comment->id }})"
+                                            class="text-[9px] font-black text-indigo-400 uppercase tracking-widest hover:text-white transition-colors">
+                                        Reply
+                                    </button>
+                                </div>
 
                                 @foreach($comment->replies as $reply)
                                     @include('livewire.posts.partials.comment-reply', ['reply' => $reply, 'depth' => 1])
@@ -71,11 +74,13 @@
                     <form wire:submit.prevent="postComment" class="relative">
                         <textarea wire:model="newComment"
                                   rows="2"
-                                  class="w-full bg-zinc-900 border border-white/5 rounded-3xl p-4 pr-16 text-sm text-white placeholder-zinc-600 outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
-                                  placeholder="Write a reply…"></textarea>
-                        @error('newComment') <p class="text-red-400 text-xs mt-2">{{ $message }}</p> @enderror
+                                  class="w-full bg-zinc-900 border border-white/5 rounded-3xl p-4 pr-14 text-sm text-white placeholder-zinc-600 outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
+                                  placeholder="Share your thoughts…"></textarea>
+                        @error('newComment')
+                            <p class="text-rose-400/80 text-[10px] font-bold uppercase tracking-widest mt-2 ml-1 animate-pulse">{{ $message }}</p>
+                        @enderror
                         <button type="submit" wire:loading.attr="disabled" wire:target="postComment"
-                                class="absolute right-2 bottom-2 p-3 bg-white text-zinc-950 rounded-2xl hover:bg-indigo-500 hover:text-white transition-all disabled:opacity-50">
+                                class="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-white text-zinc-950 rounded-xl hover:bg-indigo-500 hover:text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
                         </button>
                     </form>

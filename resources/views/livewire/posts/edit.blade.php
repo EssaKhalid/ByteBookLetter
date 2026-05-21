@@ -25,11 +25,13 @@
 
         <div>
             <label class="text-[9px] font-black text-zinc-500 uppercase tracking-[0.3em] mb-3 block">Privacy</label>
-            <select wire:model="form.privacy" class="w-full bg-zinc-950 border border-white/5 rounded-2xl px-5 py-3 text-sm text-white">
-                @foreach(\App\Enums\PostPrivacy::cases() as $privacy)
-                    <option value="{{ $privacy->value }}">{{ $privacy->label() }}</option>
-                @endforeach
-            </select>
+            <button type="button" wire:click="cyclePrivacy"
+                    class="flex items-center space-x-2 px-5 py-3 bg-zinc-950 border border-white/5 rounded-2xl text-sm text-white hover:border-white/20 transition-all">
+                <svg class="w-4 h-4 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                </svg>
+                <span>{{ $form->privacy === 'public' ? 'Public' : ($form->privacy === 'friends' ? 'Friends Only' : 'Only Me') }}</span>
+            </button>
         </div>
 
         <div>

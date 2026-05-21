@@ -2,76 +2,35 @@
 
 namespace App\Livewire\Posts;
 
-use App\Models\Comment;
 use App\Models\Post;
-use Livewire\Attributes\Isolate;
-use Livewire\Attributes\On;
+use App\Models\Comment;
+use Livewire\Attributes\Session;
+use Livewire\Attributes\Url;
 use Livewire\Component;
+use Livewire\Attributes\On;
+use Livewire\Attributes\Isolate;
 
 #[Isolate]
 class Comments extends Component
 {
+    #[Url (as: 'thread')]
     public ?int $postId = null;
-
     public ?int $replyingTo = null;
-
     public string $newComment = '';
 
-    public int $commentsCount = 0;
-
     #[On('open-comment-modal')]
-    public function openModal(int|array $postId = 0): void
+    public function openModal($postId)
     {
-        if (is_array($postId)) {
-            $postId = (int) ($postId['postId'] ?? 0);
-        }
-
-        if (! $postId) {
-            return;
-        }
-
         $this->postId = $postId;
-        $this->replyingTo = null;
-        $this->newComment = '';
-        $this->loadComments();
+        $this->reset(['newComment', 'replyingTo']);
     }
 
-    public function close(): void
+    public function postComment()
     {
-        $this->postId = null;
-        $this->replyingTo = null;
-        $this->newComment = '';
-    }
-
-    public function setReply(int $commentId): void
-    {
-        $this->replyingTo = $commentId;
-    }
-
-    public function cancelReply(): void
-    {
-        $this->replyingTo = null;
-    }
-
-    public function deleteComment(int $commentId): void
-    {
-        $comment = Comment::findOrFail($commentId);
-
-        if ($comment->user_id !== auth()->id()) {
-            return;
-        }
-
-        $comment->delete();
-        $this->loadComments();
-    }
-
-    public function postComment(): void
-    {
-        if (! $this->postId) {
-            return;
-        }
-
-        $this->validate(['newComment' => 'required|string|min:1|max:1255']);
+        $this->validate(
+            ['newComment' => 'required|max:1255'],
+            ['newComment.required' => 'Type something before sending!']
+        );
 
         auth()->user()->comments()->create([
             'post_id' => $this->postId,
@@ -80,55 +39,74 @@ class Comments extends Component
         ]);
 
         $this->reset(['newComment', 'replyingTo']);
-        $this->loadComments();
-        $this->dispatch('comment-posted', postId: $this->postId);
     }
 
-    protected function loadComments(): void
+    public function deleteComment($commentId)
     {
-        if (! $this->postId) {
-            return;
+        $comment = Comment::findOrFail($commentId);
+
+        if ($comment->user_id === auth()->id()) {
+            $comment->delete();
         }
+    }
 
-        $post = Post::query()
-            ->withCount('comments')
-            ->with([
-                'comments' => fn ($query) => $query
-                    ->whereNull('parent_id')
-                    ->latest()
-                    ->with(['user', 'replies' => fn ($q) => $q->latest()->with(['user', 'replies' => fn ($q2) => $q2->latest()->with('user')])]),
-            ])
-            ->find($this->postId);
+    public function setReply($commentId)
+    {
+        $this->replyingTo = $commentId;
+    }
 
-        $this->commentsCount = $post?->comments_count ?? 0;
+    public function cancelReply()
+    {
+        $this->replyingTo = null;
+    }
+
+    public function close()
+    {
+        $this->reset();
     }
 
     public function render()
     {
         $post = null;
+        $comments = [];
+        $commentsCount = 0;
         $replyingToUser = null;
 
         if ($this->postId) {
-            $post = Post::query()
-                ->withCount('comments')
-                ->with([
-                    'comments' => fn ($query) => $query
-                        ->whereNull('parent_id')
-                        ->latest()
-                        ->with(['user', 'replies' => fn ($q) => $q->latest()->with(['user', 'replies' => fn ($q2) => $q2->latest()->with('user')])]),
-                ])
-                ->find($this->postId);
+            $post = Post::withCount('comments')->find($this->postId);
+            $commentsCount = $post?->comments_count ?? 0;
 
-            $this->commentsCount = $post?->comments_count ?? 0;
+            $comments = Comment::query()
+                ->where('post_id', $this->postId)
+                ->whereNull('parent_id') // Get main comments
+                ->withCount('likes')
+                ->with([
+                    'user',
+                    // Level 1: Go inside the replies
+                    'replies' => function ($q) {
+                        $q->withCount('likes') // Count likes for the first replies
+                        ->with('user')
+                            ->with([
+                                // Level 2: Go inside the replies of the replies!
+                                'replies' => function ($q2) {
+                                    $q2->withCount('likes')->with('user');
+                                }
+                            ]);
+                    }
+                ])
+                ->latest()
+                ->cursorPaginate(50);
 
             if ($this->replyingTo) {
-                $parent = Comment::with('user')->find($this->replyingTo);
-                $replyingToUser = $parent?->user;
+                $replyingComment = Comment::with('user')->find($this->replyingTo);
+                $replyingToUser = $replyingComment?->user;
             }
         }
 
         return view('livewire.posts.comments', [
+            'comments' => $comments,
             'post' => $post,
+            'commentsCount' => $commentsCount,
             'replyingToUser' => $replyingToUser,
         ]);
     }

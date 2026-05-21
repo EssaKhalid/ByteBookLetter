@@ -62,7 +62,7 @@
                      "
                      @mouseleave="x = 0; y = 0"
                      class="inline-block">
-                    <a href="/post/create"
+                    <a href="{{ route('post.create') }}"
                        :style="`transform: translate(${x}px, ${y}px)`"
                        class="relative px-12 py-5 bg-white text-zinc-950 rounded-full font-black text-xs uppercase tracking-[0.2em] transition-all duration-200 shadow-[0_0_40px_rgba(255,255,255,0.1)] hover:shadow-[0_0_60px_rgba(255,255,255,0.2)] block">
                         Launch Universe

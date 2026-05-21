@@ -2,35 +2,42 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Comment extends Model
 {
     protected $fillable = ['post_id', 'parent_id', 'body', 'user_id'];
 
+    use HasFactory;
+    public function commentUrl()
+    {
+        return route('profile.show', $this->user->name) . '#comment-' . $this->id;
+    }
 
-    public function user()
+    public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }
 
-    public function post()
+    public function post(): BelongsTo
     {
         return $this->belongsTo(Post::class);
     }
-    public function parent()
+
+    public function parent(): BelongsTo
     {
-        // Logic: Find the ONE row where the "id" matches MY "parent_id"
         return $this->belongsTo(Comment::class, 'parent_id');
     }
 
-    public function replies()
+    public function replies(): HasMany
     {
-        // Logic: Find all rows where the "parent_id" matches MY "id"
         return $this->hasMany(Comment::class, 'parent_id');
     }
 
-    public function likes()
+    public function likes(): HasMany
     {
         return $this->hasMany(CommentLike::class);
     }

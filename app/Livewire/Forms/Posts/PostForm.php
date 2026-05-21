@@ -4,20 +4,26 @@ namespace App\Livewire\Forms\Posts;
 
 use App\Enums\PostPrivacy;
 use App\Models\Post;
+use App\Models\PostImage;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rules\Enum;
 use Livewire\Attributes\Isolate;
+use Livewire\Attributes\On;
+use Livewire\Attributes\Session;
 use Livewire\Attributes\Validate;
 use Livewire\Form;
 
+#[Isolate]
 class PostForm extends Form
 {
 
     public ?Post $post;
 
     #[Validate('required_without:images|max:1255')]
+    #[Session]
     public $body = '';
 
     #[Validate([
@@ -40,12 +46,47 @@ class PostForm extends Form
         ];
     }
 
+    public function cyclePrivacy()
+    {
+        $next = match($this->privacy) {
+            'public' => 'friends',
+            'friends' => 'private',
+            'private' => 'public',
+            default => 'public',
+        };
+
+        $this->privacy = $next;
+    }
+
+    public function cyclePrivacyOnPost(Post $post)
+    {
+        Gate::authorize('update', $post);
+
+        $current = $post->privacy;
+
+        $next = match($current) {
+            PostPrivacy::PUBLIC => PostPrivacy::FRIENDS,
+            PostPrivacy::FRIENDS => PostPrivacy::PRIVATE,
+            PostPrivacy::PRIVATE => PostPrivacy::PUBLIC,
+        };
+
+        $post->update(['privacy' => $next]);
+    }
+
     public function removeImage($index)
     {
         $this->images = collect($this->images)
             ->forget($index)
             ->values()
             ->all();
+    }
+
+    public function deleteExistingImage($imageId)
+    {
+        $image = PostImage::findOrFail($imageId);
+        Gate::authorize('delete', $image->post);
+        Storage::disk('public')->delete($image->path);
+        $image->delete();
     }
 
     public function setPost(Post $post)
@@ -55,7 +96,17 @@ class PostForm extends Form
         $this->privacy = $post->privacy->value;
     }
 
-    #[Isolate]
+    public function destroy()
+    {
+        Gate::authorize('delete', $this->post);
+
+        foreach ($this->post->images as $image) {
+            Storage::disk('public')->delete($image->path);
+        }
+
+        $this->post->delete();
+    }
+
     public function update()
     {
         Gate::authorize('update', $this->post);
@@ -77,7 +128,6 @@ class PostForm extends Form
         $this->reset('images');
     }
 
-    #[Isolate]
     public function save()
     {
         Gate::authorize('create', Post::class);
@@ -85,7 +135,7 @@ class PostForm extends Form
         $this->validate();
 
         DB::transaction(function () {
-           $newPost = auth()->user()->posts()->create([
+            $newPost = auth()->user()->posts()->create([
                 'body' => $this->body,
                 'privacy' => $this->privacy,
             ]);

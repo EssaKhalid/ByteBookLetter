@@ -117,7 +117,14 @@
                 </div>
 
                 <div class="flex items-center space-x-6">
-                    <button type="button" class="text-xs font-bold uppercase tracking-widest text-gray-600 hover:text-white transition-colors">Cancel</button>
+                    <button type="button" wire:click="cyclePrivacy"
+                            class="flex items-center space-x-2 px-4 py-2.5 bg-white/[0.03] border border-white/5 rounded-full text-[10px] font-black uppercase tracking-[0.15em] text-zinc-500 hover:text-white hover:border-white/20 transition-all">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                        </svg>
+                        <span>{{ $form->privacy === 'public' ? 'Public' : ($form->privacy === 'friends' ? 'Friends' : 'Only Me') }}</span>
+                    </button>
+                    <a href="{{ route('feed') }}" wire:navigate class="text-xs font-bold uppercase tracking-widest text-gray-600 hover:text-white transition-colors">Cancel</a>
                     <button type="submit" wire:loading.attr="disabled" class="px-10 py-3 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-full text-[10px] font-black tracking-[0.2em] text-white uppercase shadow-[0_0_20px_rgba(99,102,241,0.3)] hover:scale-105 active:scale-95 transition-all">
                         <span wire:loading.remove>Publish Post</span>
                         <span wire:loading>Publishing...</span>

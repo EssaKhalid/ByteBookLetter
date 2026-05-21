@@ -23,10 +23,13 @@
             <p class="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap">{{ $reply->body }}</p>
         </div>
 
-        <button type="button" wire:click="setReply({{ $reply->id }})"
-                class="mt-2 ml-1 text-[9px] font-black text-indigo-400 uppercase tracking-widest hover:text-white transition-colors">
-            Reply
-        </button>
+        <div class="mt-2 ml-1 flex items-center gap-3">
+            <livewire:posts.comment-like :comment="$reply" :wire:key="'clike-'.$reply->id" />
+            <button type="button" wire:click="setReply({{ $reply->id }})"
+                    class="text-[9px] font-black text-indigo-400 uppercase tracking-widest hover:text-white transition-colors">
+                Reply
+            </button>
+        </div>
 
         @foreach($reply->replies as $nested)
             @include('livewire.posts.partials.comment-reply', ['reply' => $nested, 'depth' => $depth + 1])
