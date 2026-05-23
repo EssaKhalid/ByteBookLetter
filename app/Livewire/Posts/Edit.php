@@ -34,6 +34,17 @@ class Edit extends Component
         return $this->redirect($this->previousurl, navigate: true);
     }
 
+    public function deleteExistingImage($imageId)
+    {
+        $this->form->deleteExistingImage($imageId);
+        $this->post->load('images');
+    }
+
+    public function removeImage($index)
+    {
+        $this->form->removeImage($index);
+    }
+
     public function cyclePrivacy()
     {
         $this->form->cyclePrivacy();

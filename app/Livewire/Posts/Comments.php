@@ -17,11 +17,19 @@ class Comments extends Component
     public ?int $postId = null;
     public ?int $replyingTo = null;
     public string $newComment = '';
+    public int $perPage = 10;
+
+    public function loadMore()
+    {
+        usleep(3500000);
+        $this->perPage += 10;
+    }
 
     #[On('open-comment-modal')]
     public function openModal($postId)
     {
         $this->postId = $postId;
+        $this->perPage = 10;
         $this->reset(['newComment', 'replyingTo']);
     }
 
@@ -38,6 +46,7 @@ class Comments extends Component
             'body' => trim($this->newComment),
         ]);
 
+        $this->perPage++;
         $this->reset(['newComment', 'replyingTo']);
     }
 
@@ -95,7 +104,7 @@ class Comments extends Component
                     }
                 ])
                 ->latest()
-                ->cursorPaginate(50);
+                ->cursorPaginate($this->perPage);
 
             if ($this->replyingTo) {
                 $replyingComment = Comment::with('user')->find($this->replyingTo);

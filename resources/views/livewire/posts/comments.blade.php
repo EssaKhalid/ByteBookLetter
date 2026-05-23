@@ -59,8 +59,25 @@
                             <p class="text-zinc-400 text-sm">No comments yet. Say something first.</p>
                         </div>
                     @endforelse
-                </div>
 
+                    @if($comments->hasMorePages())
+                        <div x-intersect:enter="$wire.loadMore()"
+                             wire:loading.remove
+                             wire:target="loadMore"
+                             class="h-12 w-full"></div>
+                        <div wire:loading
+                             wire:target="loadMore"
+                             class="w-full py-6">
+                            <div class="mx-auto flex items-center justify-center gap-3">
+                                <svg class="animate-spin w-6 h-6 text-indigo-400 drop-shadow-[0_0_8px_rgba(99,102,241,0.5)]" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                                    <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                                </svg>
+                                <span class="text-[9px] font-black text-indigo-400/80 uppercase tracking-widest animate-pulse">Loading more…</span>
+                            </div>
+                        </div>
+                    @endif
+                </div>
                 <div class="p-5 sm:p-6 bg-zinc-950/80 border-t border-white/5 shrink-0">
                     @if($replyingTo)
                         <div class="flex items-center justify-between mb-3 px-1">

@@ -75,10 +75,10 @@ class PostForm extends Form
 
     public function removeImage($index)
     {
-        $this->images = collect($this->images)
-            ->forget($index)
-            ->values()
-            ->all();
+        $this->images = collect($this->images) // converts it to a laravel array
+            ->forget($index) // 1. Remove the image at the selected position
+            ->values()       // 2. Reset the list numbers so there are no gaps (e.g., 0, 2 becomes 0, 1)
+            ->all();         // 3. Convert it back to a standard PHP array
     }
 
     public function deleteExistingImage($imageId)

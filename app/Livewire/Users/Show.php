@@ -19,6 +19,10 @@ class Show extends Component
 
     use withPagination;
 
+    public int $postsPerPage = 10;
+    public int $followersPage = 1;
+    public int $followingPage = 1;
+
     #[Url(as: 'view')]
     public string $tab = 'posts';
 
@@ -26,6 +30,32 @@ class Show extends Component
     {
         $this->user = $user->loadCount(['posts', 'followers', 'following']);
 
+    }
+
+    public function loadMorePosts()
+    {
+        usleep(3500000);
+        $this->postsPerPage += 10;
+    }
+
+    public function nextFollowersPage()
+    {
+        $this->followersPage++;
+    }
+
+    public function prevFollowersPage()
+    {
+        $this->followersPage = max(1, $this->followersPage - 1);
+    }
+
+    public function nextFollowingPage()
+    {
+        $this->followingPage++;
+    }
+
+    public function prevFollowingPage()
+    {
+        $this->followingPage = max(1, $this->followingPage - 1);
     }
 
     #[\Livewire\Attributes\On('delete-post')]
@@ -53,10 +83,10 @@ class Show extends Component
             }
         }
 
-        $followersList = $this->user->followers()->latest()->simplePaginate(50, pageName: 'followers-page');
-        $followingList = $this->user->following()->latest()->simplePaginate(50, pageName: 'followings-page');
+        $followersList = $this->user->followers()->latest()->simplePaginate(50, ['*'], 'followers-page', $this->followersPage);
+        $followingList = $this->user->following()->latest()->simplePaginate(50, ['*'], 'followings-page', $this->followingPage);
 
-        $posts = $query->whereIn('privacy', $allowedPrivacy)->cursorPaginate(50);
+        $posts = $query->whereIn('privacy', $allowedPrivacy)->cursorPaginate($this->postsPerPage);
 
         return view('livewire.users.show', [
             'posts' => $posts,

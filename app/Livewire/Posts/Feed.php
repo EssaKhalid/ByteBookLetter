@@ -14,6 +14,7 @@ class Feed extends Component
     use WithPagination;
 
     public PostForm $form;
+    public int $perPage = 10;
 
 
     #[On('post-created')]
@@ -25,6 +26,12 @@ class Feed extends Component
         // No code is needed inside here.
         // The simple act of this function running
         // forces Livewire to run the render() method again!
+    }
+
+    public function loadMore()
+    {
+        usleep(3500000);
+        $this->perPage += 10;
     }
 
     #[On('delete-post')]
@@ -62,7 +69,7 @@ class Feed extends Component
             ->with(['user', 'images'])
             ->withCount('comments', 'likes')
             ->latest()
-            ->cursorPaginate(50);
+            ->cursorPaginate($this->perPage);
 
         return view('livewire.posts.feed', ['posts' => $posts]);
     }

@@ -35,19 +35,45 @@
         </div>
 
         <div>
-            <label class="text-[9px] font-black text-zinc-500 uppercase tracking-[0.3em] mb-3 block">Add images</label>
-            <input type="file" wire:model="form.images" multiple accept="image/*"
-                   class="block w-full text-sm text-zinc-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-white/10 file:text-white file:font-bold file:text-[10px] file:uppercase">
+            <label class="text-[9px] font-black text-zinc-500 uppercase tracking-[0.3em] mb-3 block">Images</label>
+
+            @if($post->images->isNotEmpty() || ($form->images && count($form->images) > 0))
+                <div class="grid grid-cols-2 gap-2 mb-4">
+                    @foreach($post->images as $image)
+                        <div class="relative aspect-square rounded-xl overflow-hidden border border-white/10 group">
+                            <img src="{{ $image->url() }}" alt="" class="w-full h-full object-cover">
+                            <button type="button"
+                                    wire:click="deleteExistingImage({{ $image->id }})"
+                                    wire:confirm="Delete this image?"
+                                    class="absolute top-2 right-2 bg-black/60 backdrop-blur-md p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-red-500 text-white z-10">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                    @endforeach
+                    @if($form->images)
+                        @foreach($form->images as $index => $img)
+                            @if($img && is_object($img) && method_exists($img, 'temporaryUrl'))
+                                <div class="relative aspect-square rounded-xl overflow-hidden border border-white/10 group">
+                                    <img src="{{ $img->temporaryUrl() }}" alt="" class="w-full h-full object-cover">
+                                    <button type="button"
+                                            wire:click="removeImage({{ $index }})"
+                                            class="absolute top-2 right-2 bg-black/60 backdrop-blur-md p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-red-500 text-white z-10">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+                                    </button>
+                                </div>
+                            @endif
+                        @endforeach
+                    @endif
+                </div>
+            @endif
+
+            <label class="flex flex-col items-center justify-center w-full p-6 border-2 border-dashed border-white/10 rounded-2xl cursor-pointer hover:border-indigo-500/50 hover:bg-indigo-500/5 transition-all group">
+                <input type="file" wire:model="form.images" multiple accept="image/*" class="hidden">
+                <svg class="w-8 h-8 text-zinc-600 group-hover:text-indigo-400 transition-colors mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                <span class="text-[10px] font-black uppercase tracking-widest text-zinc-500 group-hover:text-indigo-400 transition-colors">Add Images</span>
+            </label>
             @error('form.images.*') <p class="text-red-400 text-xs mt-2">{{ $message }}</p> @enderror
         </div>
-
-        @if($post->images->isNotEmpty())
-            <div class="grid grid-cols-3 gap-2">
-                @foreach($post->images as $image)
-                    <img src="{{ $image->url() }}" alt="" class="rounded-xl aspect-square object-cover border border-white/10">
-                @endforeach
-            </div>
-        @endif
 
         <div class="flex justify-end gap-4 pt-2">
             <a href="{{ route('feed') }}" wire:navigate class="text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-white py-3">Cancel</a>

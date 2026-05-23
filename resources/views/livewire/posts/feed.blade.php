@@ -15,4 +15,22 @@
             </a>
         </div>
     @endforelse
+
+    @if($posts->hasMorePages())
+        <div x-intersect:enter="$wire.loadMore()"
+             wire:loading.remove
+             wire:target="loadMore"
+             class="h-12 w-full"></div>
+        <div wire:loading
+             wire:target="loadMore"
+             class="w-full py-8">
+            <div class="mx-auto flex items-center justify-center gap-3">
+                <svg class="animate-spin w-7 h-7 text-indigo-400 drop-shadow-[0_0_10px_rgba(99,102,241,0.5)]" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                    <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                <span class="text-[10px] font-black text-indigo-400/80 uppercase tracking-widest animate-pulse">Loading more…</span>
+            </div>
+        </div>
+    @endif
 </div>

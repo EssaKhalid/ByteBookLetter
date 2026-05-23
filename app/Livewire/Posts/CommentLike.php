@@ -25,7 +25,6 @@ class CommentLike extends Component
             ->where('comment_id', $this->comment->id)
             ->exists();
     }
-
     public function toggleLike()
     {
         if (!auth()->check()) return $this->redirectRoute('login');
